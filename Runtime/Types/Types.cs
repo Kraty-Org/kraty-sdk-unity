@@ -199,6 +199,36 @@ namespace Kraty
         [JsonProperty("currencyKey")] public string? CurrencyKey { get; set; }
     }
 
+    /// <summary>
+    /// How much of the player's attempt allowance on this event window is
+    /// spent, for an entry counter ("Play — 1/2 today").
+    /// <para>
+    /// The <c>Used*</c> counts include a live attempt: an entry is spent
+    /// when it starts, not when it finishes. A counter is only populated
+    /// when the matching cap is set — an uncapped event reports <c>0</c>
+    /// used and a <c>null</c> maximum. <see cref="Remaining"/> is the
+    /// tightest configured cap, <c>null</c> when nothing is capped.
+    /// </para>
+    /// </summary>
+    public sealed class AttemptQuota
+    {
+        /// <summary>Attempts allowed for the whole window; null = unlimited.</summary>
+        [JsonProperty("maxPerWindow")] public int? MaxPerWindow { get; set; }
+        [JsonProperty("usedInWindow")] public int UsedInWindow { get; set; }
+        /// <summary>Attempts allowed per local calendar day; null = unlimited.</summary>
+        [JsonProperty("maxPerDay")] public int? MaxPerDay { get; set; }
+        [JsonProperty("usedToday")] public int UsedToday { get; set; }
+        /// <summary>What the player can still start now; null = unlimited.</summary>
+        [JsonProperty("remaining")] public int? Remaining { get; set; }
+
+        /// <summary>
+        /// True when a cap is configured and fully spent, so the next
+        /// <c>StartAsync</c> would be refused. Drives a greyed-out Play button.
+        /// </summary>
+        [JsonIgnore]
+        public bool IsExhausted => Remaining == 0;
+    }
+
     public sealed class EventListing
     {
         [JsonProperty("eventKey")] public string EventKey { get; set; } = string.Empty;
@@ -257,6 +287,13 @@ namespace Kraty
 
         /// <summary>Reward policy summary with inline bundle previews.</summary>
         [JsonProperty("rewardPolicy")] public RewardPolicySummary? RewardPolicy { get; set; }
+
+        /// <summary>
+        /// Attempts spent vs. allowed for this player. Null only on
+        /// backends older than the attempt-quota field; a modern backend
+        /// always sets it (null maxima when the event caps nothing).
+        /// </summary>
+        [JsonProperty("attemptQuota")] public AttemptQuota? AttemptQuota { get; set; }
 
         /// <summary>
         /// True when <see cref="LeaderboardMode"/> is <c>lobby_matched</c>.

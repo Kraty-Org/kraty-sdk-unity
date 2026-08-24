@@ -27,7 +27,7 @@ per-player bootstrap.
 > **Do not pin to `v0.21.0`.** That release shipped two runtime scripts without
 > their `.meta` files, so Unity silently skipped them and the package failed
 > to compile (`CS0246: ... 'InventoryStream' could not be found`). Use
-> `v0.24.0` or later.
+> `v0.25.0` or later.
 
 ## Install
 
@@ -38,13 +38,13 @@ In `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "app.kraty.sdk": "https://github.com/PedroTrincheiras/kraty-sdk-unity.git#v0.24.0"
+    "app.kraty.sdk": "https://github.com/Kraty-Org/kraty-sdk-unity.git#v0.25.0"
   }
 }
 ```
 
 Tags live at
-[github.com/PedroTrincheiras/kraty-sdk-unity/releases](https://github.com/PedroTrincheiras/kraty-sdk-unity/releases);
+[github.com/Kraty-Org/kraty-sdk-unity/releases](https://github.com/Kraty-Org/kraty-sdk-unity/releases);
 each release is a flat-rooted mirror of this package that Unity
 Package Manager can pull directly.
 
@@ -230,7 +230,7 @@ Unity ignores everything outside `Runtime/`, so the `.csproj` +
 ## Publishing (maintainers)
 
 Releases are pushed from the private monorepo into
-[PedroTrincheiras/kraty-sdk-unity](https://github.com/PedroTrincheiras/kraty-sdk-unity)
+[Kraty-Org/kraty-sdk-unity](https://github.com/Kraty-Org/kraty-sdk-unity)
 via `scripts/sync-public-sdks.sh`:
 
 ```bash
@@ -248,5 +248,5 @@ idempotent: re-running for the same version is a no-op.
 Consumers update by bumping the ref in their `manifest.json`:
 
 ```json
-"app.kraty.sdk": "https://github.com/PedroTrincheiras/kraty-sdk-unity.git#v0.24.0"
+"app.kraty.sdk": "https://github.com/Kraty-Org/kraty-sdk-unity.git#v0.25.0"
 ```
