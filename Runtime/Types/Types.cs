@@ -931,6 +931,108 @@ namespace Kraty
     }
 
     /// <summary>
+    /// Input for <see cref="PurchasesClient.TrackAsync"/> (a.k.a.
+    /// <c>kraty.TrackPurchaseAsync</c>).
+    ///
+    /// <para>
+    /// <see cref="AmountMinor"/> is in the currency's MINOR units as
+    /// charged — cents for USD, whole yen for JPY. Unity IAP already
+    /// reports minor units, so pass its value through unchanged rather
+    /// than converting to a <c>decimal</c> or <c>float</c>.
+    /// </para>
+    ///
+    /// <para>
+    /// There is no idempotency key: <see cref="TransactionId"/> IS the
+    /// idempotency key and it comes from the store. Calling this
+    /// repeatedly for one transaction records nothing new and moves no
+    /// total, so calling it unconditionally on every restore is the
+    /// intended usage.
+    /// </para>
+    /// </summary>
+    public sealed class TrackPurchaseInput
+    {
+        /// <summary>The store's transaction id. Used for dedupe.</summary>
+        [JsonProperty("transactionId")] public string TransactionId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// One of <c>app_store</c>, <c>google_play</c>, <c>steam</c>,
+        /// <c>epic</c>, <c>amazon</c>, <c>microsoft</c>,
+        /// <c>playstation</c>, <c>nintendo</c>, <c>web</c>, <c>other</c>.
+        /// </summary>
+        [JsonProperty("store")] public string Store { get; set; } = string.Empty;
+
+        /// <summary>The store's product id / SKU.</summary>
+        [JsonProperty("productId")] public string ProductId { get; set; } = string.Empty;
+
+        /// <summary>
+        /// One of <c>consumable</c>, <c>non_consumable</c>,
+        /// <c>subscription</c>. Optional.
+        /// </summary>
+        [JsonProperty("productType")] public string? ProductType { get; set; }
+
+        /// <summary>Minor units as charged: <c>499</c> is $4.99 in USD, ¥499 in JPY.</summary>
+        [JsonProperty("amountMinor")] public int AmountMinor { get; set; }
+
+        /// <summary>ISO 4217 alpha-3, e.g. <c>"USD"</c>, <c>"BRL"</c>, <c>"JPY"</c>.</summary>
+        [JsonProperty("currency")] public string Currency { get; set; } = string.Empty;
+
+        /// <summary>Store receipt / purchase token, retained for later validation.</summary>
+        [JsonProperty("receipt")] public string? Receipt { get; set; }
+
+        /// <summary>ISO-8601. Defaults to the server's clock when null.</summary>
+        [JsonProperty("purchasedAt")] public string? PurchasedAt { get; set; }
+
+        /// <summary>Arbitrary studio fields: campaign id, offer id, A/B bucket, ….</summary>
+        [JsonProperty("metadata")] public Dictionary<string, object?>? Metadata { get; set; }
+    }
+
+    /// <summary>
+    /// Result of <see cref="PurchasesClient.TrackAsync"/>. Carries both
+    /// what the player was charged (<see cref="AmountMinor"/> +
+    /// <see cref="Currency"/>) and the normalized USD value
+    /// (<see cref="NormalizedAmountMinor"/>, always USD cents) that
+    /// spend thresholds and revenue reporting compare against.
+    ///
+    /// <para>
+    /// <see cref="Deduplicated"/> is true when this transaction id was
+    /// already on file. That is a success, not an error: the client
+    /// asked "is this recorded?" and the answer is yes.
+    /// </para>
+    /// </summary>
+    public sealed class TrackPurchaseResult
+    {
+        [JsonProperty("purchaseId")] public string PurchaseId { get; set; } = string.Empty;
+        [JsonProperty("transactionId")] public string TransactionId { get; set; } = string.Empty;
+        [JsonProperty("store")] public string Store { get; set; } = string.Empty;
+        [JsonProperty("productId")] public string ProductId { get; set; } = string.Empty;
+        [JsonProperty("productType")] public string? ProductType { get; set; }
+        [JsonProperty("amountMinor")] public int AmountMinor { get; set; }
+        [JsonProperty("currency")] public string Currency { get; set; } = string.Empty;
+
+        /// <summary>USD cents.</summary>
+        [JsonProperty("normalizedAmountMinor")] public int NormalizedAmountMinor { get; set; }
+
+        /// <summary>Always <c>"USD"</c>. Present so callers never hardcode the base currency.</summary>
+        [JsonProperty("normalizedCurrency")] public string NormalizedCurrency { get; set; } = "USD";
+
+        [JsonProperty("fxRate")] public double FxRate { get; set; }
+
+        /// <summary>One of <c>unverified</c>, <c>verified</c>, <c>failed</c>, <c>skipped</c>.</summary>
+        [JsonProperty("validationStatus")] public string ValidationStatus { get; set; } = string.Empty;
+
+        [JsonProperty("purchasedAt")] public string PurchasedAt { get; set; } = string.Empty;
+        [JsonProperty("metadata")] public Dictionary<string, object?>? Metadata { get; set; }
+
+        /// <summary>True when this transaction id was already on file — a replay.</summary>
+        [JsonProperty("deduplicated")] public bool Deduplicated { get; set; }
+
+        /// <summary>The player's lifetime spend in USD cents, after this purchase.</summary>
+        [JsonProperty("lifetimeAmountMinor")] public int LifetimeAmountMinor { get; set; }
+
+        [JsonProperty("purchaseCount")] public int PurchaseCount { get; set; }
+    }
+
+    /// <summary>
     /// Input for <see cref="InventoryClient.ConsumeAsync"/>. The server
     /// requires <see cref="IdempotencyKey"/> for consume; the SDK
     /// auto-generates one if you leave it null, matching the

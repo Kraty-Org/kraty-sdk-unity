@@ -854,6 +854,82 @@ namespace Kraty
     /// backend holds the canonical state). The SDK doesn't expose
     /// grant / admin-credit endpoints; those are server-API only.
     /// </summary>
+    /// <summary>
+    /// Real-money purchase reporting.
+    ///
+    /// <para>
+    /// Deliberately WRITE-ONLY. There is no client-side read of a
+    /// player's spend total: it is a monetization signal worth keeping
+    /// out of a shipped binary, and games that gate content on spend
+    /// don't need it — the backend evaluates a <c>spend_at_least</c>
+    /// unlock condition server-side and the event simply arrives locked
+    /// or unlocked.
+    /// </para>
+    /// </summary>
+    public sealed class PurchasesClient
+    {
+        private readonly KratyClient _client;
+        public PurchasesClient(KratyClient client) => _client = client;
+
+        /// <summary>
+        /// POST <c>/sdk/v1/players/:p/purchases</c>: record a real-money
+        /// purchase for the active player.
+        ///
+        /// <para>
+        /// Call it from your Unity IAP <c>ProcessPurchase</c> callback.
+        /// Safe to call repeatedly for one
+        /// <see cref="TrackPurchaseInput.TransactionId"/> — restores,
+        /// retries after a timeout, and app relaunches all collapse onto
+        /// a single ledger row, and
+        /// <see cref="TrackPurchaseResult.Deduplicated"/> tells you which
+        /// happened. That means you can call it unconditionally on every
+        /// restore without tracking what you already reported.
+        /// </para>
+        ///
+        /// <example>
+        /// <code>
+        /// var result = await kraty.TrackPurchaseAsync(new TrackPurchaseInput
+        /// {
+        ///     TransactionId = args.purchasedProduct.transactionID,
+        ///     Store         = "google_play",
+        ///     ProductId     = args.purchasedProduct.definition.id,
+        ///     ProductType   = "consumable",
+        ///     AmountMinor   = 2990,   // R$29.90 — minor units, as charged
+        ///     Currency      = "BRL",
+        ///     Receipt       = args.purchasedProduct.receipt,
+        /// });
+        /// // result.NormalizedAmountMinor == 520  ($5.20)
+        /// </code>
+        /// </example>
+        ///
+        /// <para>
+        /// Throws <see cref="KratyApiError"/> with code
+        /// <c>unknown_currency</c> if Kraty holds no FX rate for the
+        /// currency — a configuration gap rather than a player problem,
+        /// so surface it in QA rather than retrying.
+        /// </para>
+        /// </summary>
+        /// <param name="input">The purchase to record.</param>
+        /// <param name="as">Address a different player (server-side tooling only).</param>
+        /// <param name="ct">Cancellation token.</param>
+        public async Task<TrackPurchaseResult> TrackAsync(
+            TrackPurchaseInput input,
+            string? @as = null,
+            CancellationToken ct = default
+        )
+        {
+            if (input == null) throw new ArgumentNullException(nameof(input));
+            var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            var env = await _client.RequestAsync<DataEnvelope<TrackPurchaseResult>>(
+                HttpMethod.Post,
+                $"/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}/purchases",
+                body: input,
+                cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new TrackPurchaseResult();
+        }
+    }
+
     public sealed class InventoryClient
     {
         private readonly KratyClient _client;

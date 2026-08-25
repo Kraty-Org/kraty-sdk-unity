@@ -34,6 +34,7 @@ namespace Kraty
         public InventoryClient Inventory { get; }
         public WalletClient Wallet { get; }
         public PlayersClient Players { get; }
+        public PurchasesClient Purchases { get; }
         public FriendsClient Friends { get; }
         public CatalogClient Catalog { get; }
 
@@ -48,11 +49,34 @@ namespace Kraty
             Inventory = new InventoryClient(Client);
             Wallet = new WalletClient(Client);
             Players = new PlayersClient(Client);
+            Purchases = new PurchasesClient(Client);
             Friends = new FriendsClient(Client);
             Catalog = new CatalogClient(Client);
         }
 
         public void Dispose() => Client.Dispose();
+
+        /// <summary>
+        /// Record a real-money purchase for the active player.
+        ///
+        /// <para>
+        /// Shorthand for <c>kraty.Purchases.TrackAsync(...)</c>,
+        /// promoted to the top level because reporting a purchase is a
+        /// one-liner a game does from inside its IAP callback and
+        /// shouldn't have to reach through a namespace for.
+        /// </para>
+        ///
+        /// <para>
+        /// Idempotent on <see cref="TrackPurchaseInput.TransactionId"/>,
+        /// so calling it unconditionally on every restore — without
+        /// tracking what you already reported — is the intended usage.
+        /// </para>
+        /// </summary>
+        public Task<TrackPurchaseResult> TrackPurchaseAsync(
+            TrackPurchaseInput input,
+            string? @as = null,
+            CancellationToken ct = default
+        ) => Purchases.TrackAsync(input, @as, ct);
 
         /// <summary>
         /// The active player this SDK is currently representing. Null
