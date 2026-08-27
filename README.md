@@ -38,7 +38,7 @@ In `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "app.kraty.sdk": "https://github.com/Kraty-Org/kraty-sdk-unity.git#v0.27.0"
+    "app.kraty.sdk": "https://github.com/Kraty-Org/kraty-sdk-unity.git#v0.28.0"
   }
 }
 ```
@@ -248,5 +248,5 @@ idempotent: re-running for the same version is a no-op.
 Consumers update by bumping the ref in their `manifest.json`:
 
 ```json
-"app.kraty.sdk": "https://github.com/Kraty-Org/kraty-sdk-unity.git#v0.27.0"
+"app.kraty.sdk": "https://github.com/Kraty-Org/kraty-sdk-unity.git#v0.28.0"
 ```

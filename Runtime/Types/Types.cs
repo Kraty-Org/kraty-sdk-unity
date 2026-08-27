@@ -1274,6 +1274,30 @@ namespace Kraty
         [JsonProperty("progression")] public Dictionary<string, int>? Progression { get; set; }
     }
 
+    /// <summary>
+    /// A suggested player to add — a recently-active non-friend the caller
+    /// has no relationship with. Same identity + live-presence shape as
+    /// <see cref="Friend"/>, minus the friendship-specific
+    /// <c>FriendsSince</c> / <c>GiftCooldownUntil</c> (there's no edge yet).
+    /// Returned by <see cref="FriendsClient.SuggestionsAsync"/>.
+    /// </summary>
+    public sealed class Suggestion
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        [JsonProperty("online")] public bool Online { get; set; }
+        /// <summary>ISO timestamp of their last heartbeat, or null when never/expired.</summary>
+        [JsonProperty("lastActiveAt")] public string? LastActiveAt { get; set; }
+        /// <summary>Free-form client-set status ("in_match", "lobby", …), or null.</summary>
+        [JsonProperty("status")] public string? Status { get; set; }
+        /// <summary>
+        /// Progression balances requested via the call's <c>progression</c>
+        /// argument, e.g. <c>{ "level": 12 }</c>. Null when none were asked
+        /// for; a resource the player never earned reads <c>0</c>.
+        /// </summary>
+        [JsonProperty("progression")] public Dictionary<string, int>? Progression { get; set; }
+    }
+
     /// <summary>A player the caller has blocked.</summary>
     public sealed class BlockedPlayer
     {
@@ -1461,6 +1485,12 @@ namespace Kraty
     internal sealed class FriendSearchEnvelope
     {
         [JsonProperty("results")] public List<FriendSearchResult>? Results { get; set; }
+    }
+
+    /// <summary>Wrapper for <c>{ "data": { "suggestions": [...] } }</c>.</summary>
+    internal sealed class FriendSuggestionsEnvelope
+    {
+        [JsonProperty("suggestions")] public List<Suggestion>? Suggestions { get; set; }
     }
 
     /// <summary>Wrapper for <c>{ "data": { "friend": {...} } }</c>.</summary>

@@ -253,6 +253,26 @@ namespace Kraty.Tests
             Assert.Equal("idem-1", (string?)body["idempotencyKey"]);
         }
 
+        // ── FriendsClient ────────────────────────────────────────────
+
+        [Fact]
+        public async Task FriendsSuggestionsUnwrapsAndSendsLimitAndProgression()
+        {
+            var handler = new FakeHandler().Push(200,
+                "{\"data\":{\"suggestions\":[" +
+                "{\"externalPlayerId\":\"carol\",\"displayIdentity\":{\"name\":\"Carol\"},\"online\":false,\"lastActiveAt\":null,\"status\":null}" +
+                "]}}");
+            using var kraty = new Kraty(BaseOpts(handler, "ps"));
+            var suggestions = await kraty.Friends.SuggestionsAsync(
+                limit: 5, @as: "alice", progression: new[] { "level" });
+            Assert.Single(suggestions);
+            Assert.Equal("carol", suggestions[0].ExternalPlayerId);
+            Assert.False(suggestions[0].Online);
+            Assert.Equal(
+                $"{BaseUrl}/sdk/v1/players/alice/friends/suggestions?limit=5&progression=level",
+                handler.Calls[0].Url);
+        }
+
         // ── WalletClient ─────────────────────────────────────────────
 
         [Fact]

@@ -1455,6 +1455,37 @@ namespace Kraty
         }
 
         /// <summary>
+        /// GET <c>/sdk/v1/players/:p/friends/suggestions</c>: "people you may
+        /// want to add" — recently-active players in the same game +
+        /// environment the caller isn't already related to (not a friend, no
+        /// pending request either way, not blocked). Results are a
+        /// weighted-random sample biased toward the most recently active, so
+        /// calling it again surfaces a different set.
+        /// </summary>
+        /// <param name="limit">How many to return; defaults to 5 server-side (clamped 1–25).</param>
+        /// <param name="as">Address a different player (server-side tooling only).</param>
+        /// <param name="progression">Economy keys whose balances to attach to each suggestion.</param>
+        /// <param name="ct">Cancellation token.</param>
+        public async Task<List<Suggestion>> SuggestionsAsync(
+            int? limit = null,
+            string? @as = null,
+            IEnumerable<string>? progression = null,
+            CancellationToken ct = default)
+        {
+            var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            var qs = new List<string>();
+            if (limit.HasValue) qs.Add($"limit={limit.Value}");
+            var progressionKeys = progression == null ? string.Empty : string.Join(",", progression);
+            if (progressionKeys.Length > 0) qs.Add($"progression={Uri.EscapeDataString(progressionKeys)}");
+            var suffix = qs.Count == 0 ? string.Empty : $"?{string.Join("&", qs)}";
+            var path = $"/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}/friends/suggestions{suffix}";
+            var env = await _client.RequestAsync<DataEnvelope<FriendSuggestionsEnvelope>>(
+                HttpMethod.Get, path, cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data?.Suggestions ?? new List<Suggestion>();
+        }
+
+        /// <summary>
         /// GET <c>/sdk/v1/players/:p/friends/requests</c>: the caller's
         /// pending incoming + outgoing friend requests.
         /// </summary>
