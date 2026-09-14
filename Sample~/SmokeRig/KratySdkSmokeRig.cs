@@ -337,6 +337,14 @@ namespace Kraty.Sample.SmokeRig
             {
                 AppendLog($"<color=#ff9f9f>api error:</color> [{err.Status}] {err.Code}: {err.Message}");
             }
+            catch (KratyNetworkError err)
+            {
+                // Never reached the backend (DNS, no route, socket reset) and
+                // the SDK's retry budget is already spent. Distinct colour
+                // from an api error so a red smoke-rig line always means
+                // "Kraty said no" rather than "this device is offline".
+                AppendLog($"<color=#ffd479>offline:</color> {err.Message}");
+            }
             catch (Exception err)
             {
                 AppendLog($"<color=#ff9f9f>error:</color> {err.GetType().Name}: {err.Message}");

@@ -52,6 +52,17 @@ namespace Kraty.Samples
                 // rejected (e.g. a bad division value lists the valid ones).
                 Debug.LogError($"[Kraty] API error {e.Status} {e.Code}: {e.Message}");
             }
+            catch (KratyNetworkError e)
+            {
+                // The request never reached Kraty: no connectivity, captive
+                // portal, or the device's resolver still waking up. NOT a
+                // backend failure and NOT a bug -- the SDK already retried
+                // with backoff. Treat it as an offline state (show cached
+                // data, retry later), never as a crash: this is exactly the
+                // exception that takes a build down when it escapes an
+                // `async void` entry point like this Start().
+                Debug.LogWarning($"[Kraty] offline, skipping this run: {e.Message}");
+            }
             catch (Exception e)
             {
                 Debug.LogError($"[Kraty] {e}");

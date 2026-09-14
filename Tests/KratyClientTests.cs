@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Threading.Tasks;
@@ -192,6 +194,99 @@ namespace Kraty.Tests
             using var client = new KratyClient(opts);
             await Assert.ThrowsAsync<KratyNetworkError>(async () =>
                 await client.RequestAsync<DataEnvelope<object>>(HttpMethod.Get, "/sdk/v1/ping"));
+        }
+
+        // A DNS failure is the single most common client-side crash the
+        // SDK surfaces in the wild (Android waking from doze, captive
+        // portal, carrier IPv6). It must back off on the SLOW ladder:
+        // retrying inside a second just re-hits the same failed lookup.
+        [Fact]
+        public async Task ConnectivityFailureBacksOffOnTheOfflineLadder()
+        {
+            var handler = new FakeHandler()
+                .PushError(new HttpRequestException(
+                    "An error occurred while sending the request",
+                    new WebException("Error: NameResolutionFailure", WebExceptionStatus.NameResolutionFailure)))
+                .PushError(new HttpRequestException(
+                    "An error occurred while sending the request",
+                    new WebException("Error: NameResolutionFailure", WebExceptionStatus.NameResolutionFailure)));
+            var opts = BaseOpts(handler);
+            opts.Retry = new RetryConfig
+            {
+                Attempts = 2,
+                InitialDelay = TimeSpan.FromMilliseconds(1),
+                OfflineInitialDelay = TimeSpan.FromMilliseconds(250),
+                MaxDelay = TimeSpan.FromSeconds(1),
+                Jitter = 0,
+            };
+            using var client = new KratyClient(opts);
+
+            var sw = Stopwatch.StartNew();
+            await Assert.ThrowsAsync<KratyNetworkError>(async () =>
+                await client.RequestAsync<DataEnvelope<object>>(HttpMethod.Get, "/sdk/v1/ping"));
+            sw.Stop();
+
+            Assert.Equal(2, handler.Calls.Count);
+            Assert.True(
+                sw.ElapsedMilliseconds >= 200,
+                $"expected the offline ladder (~250ms), waited {sw.ElapsedMilliseconds}ms");
+        }
+
+        // Mirror of the above: a failure that is NOT connectivity-class
+        // keeps the fast sub-second ladder, so a flaky socket against a
+        // reachable backend still recovers promptly.
+        [Fact]
+        public async Task NonConnectivityFailureKeepsTheFastLadder()
+        {
+            var handler = new FakeHandler()
+                .PushError(new HttpRequestException("stream truncated"))
+                .Push(200, "{\"data\":{}}");
+            var opts = BaseOpts(handler);
+            opts.Retry = new RetryConfig
+            {
+                Attempts = 2,
+                InitialDelay = TimeSpan.FromMilliseconds(1),
+                OfflineInitialDelay = TimeSpan.FromSeconds(5),
+                MaxDelay = TimeSpan.FromSeconds(10),
+                Jitter = 0,
+            };
+            using var client = new KratyClient(opts);
+
+            var sw = Stopwatch.StartNew();
+            await client.RequestAsync<DataEnvelope<object>>(HttpMethod.Get, "/sdk/v1/ping");
+            sw.Stop();
+
+            Assert.Equal(2, handler.Calls.Count);
+            Assert.True(
+                sw.ElapsedMilliseconds < 2000,
+                $"expected the fast ladder, waited {sw.ElapsedMilliseconds}ms");
+        }
+
+        // A socket-level "host not found" is the same condition arriving
+        // through a different exception type, so it must classify the
+        // same way and keep the underlying cause reachable for logging.
+        [Fact]
+        public async Task SocketHostNotFoundIsTreatedAsConnectivityAndPreservesCause()
+        {
+            var cause = new SocketException((int)SocketError.HostNotFound);
+            var handler = new FakeHandler()
+                .PushError(new HttpRequestException("send failure", cause));
+            var opts = BaseOpts(handler);
+            opts.Retry = new RetryConfig
+            {
+                Attempts = 1,
+                InitialDelay = TimeSpan.FromMilliseconds(1),
+                OfflineInitialDelay = TimeSpan.FromMilliseconds(250),
+                MaxDelay = TimeSpan.FromSeconds(1),
+                Jitter = 0,
+            };
+            using var client = new KratyClient(opts);
+
+            var err = await Assert.ThrowsAsync<KratyNetworkError>(async () =>
+                await client.RequestAsync<DataEnvelope<object>>(HttpMethod.Get, "/sdk/v1/ping"));
+
+            Assert.NotNull(err.OriginalCause);
+            Assert.Same(cause, err.OriginalCause!.InnerException);
         }
 
         [Fact]

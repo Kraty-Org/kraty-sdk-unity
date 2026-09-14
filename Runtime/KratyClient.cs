@@ -4,6 +4,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -68,13 +69,37 @@ namespace Kraty
         /// </summary>
         public IMembershipStore? MembershipStore { get; set; }
 
+        /// <summary>
+        /// Platform this client runs on, sent as <c>X-Kraty-Platform</c> on
+        /// every request so the dashboard can split players by device.
+        /// Leave unset and the SDK reads <c>Application.platform</c> —
+        /// <c>ios</c>, <c>android</c>, <c>web</c>, <c>windows</c>,
+        /// <c>macos</c>, <c>linux</c>, <c>editor</c>. Set it to the key of a
+        /// platform you defined in the game's Settings → Platforms (a store
+        /// front, a console build) to report that instead.
+        /// </summary>
+        public string? Platform { get; set; }
+
+        /// <summary>
+        /// Your game's build version, sent as <c>X-Kraty-App-Version</c> on
+        /// every request and shown on the player's profile. Leave unset and
+        /// the SDK reads <c>Application.version</c> (Player Settings →
+        /// Version).
+        /// </summary>
+        public string? AppVersion { get; set; }
+
         /// <summary>Override only for testing / staging. Production clients always hit the default.</summary>
         public string BaseUrl { get; set; } = "https://api.kraty.io";
 
         /// <summary>Per-request timeout. Defaults to 10s.</summary>
         public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(10);
 
-        /// <summary>Retry configuration. Defaults to 4 attempts with exponential backoff starting at 100ms.</summary>
+        /// <summary>
+        /// Retry configuration. Defaults to 4 attempts with exponential
+        /// backoff starting at 100ms for server-side failures, and at 1s
+        /// for connectivity failures (see
+        /// <see cref="RetryConfig.OfflineInitialDelay"/>).
+        /// </summary>
         public RetryConfig Retry { get; set; } = new();
 
         /// <summary>
@@ -141,6 +166,18 @@ namespace Kraty
         /// <summary>TOTAL number of HTTP calls (1 = no retry).</summary>
         public int Attempts { get; set; } = 4;
         public TimeSpan InitialDelay { get; set; } = TimeSpan.FromMilliseconds(100);
+        /// <summary>
+        /// Backoff floor for CONNECTIVITY-class failures (DNS
+        /// resolution, host/network unreachable) as opposed to a server
+        /// that answered. Deliberately an order of magnitude above
+        /// <see cref="InitialDelay"/>: the sub-second ladder is tuned
+        /// for a 503 from a healthy backend, but a device coming out of
+        /// doze, off a captive portal, or switching Wi-Fi-to-cellular
+        /// needs SECONDS before its resolver works again. Retrying
+        /// faster than that just burns the budget re-hitting the same
+        /// failed lookup and surfaces a spurious offline error.
+        /// </summary>
+        public TimeSpan OfflineInitialDelay { get; set; } = TimeSpan.FromSeconds(1);
         public TimeSpan MaxDelay { get; set; } = TimeSpan.FromSeconds(5);
         /// <summary>Jitter factor (0-1). Default 0.2.</summary>
         public double Jitter { get; set; } = 0.2;
@@ -163,6 +200,7 @@ namespace Kraty
     /// auto-idempotency-key stamping on POST/PUT/PATCH (re-used across
     /// retries so the server's idempotency check dedupes a replay),
     /// exponential backoff + jitter on 408/425/429/5xx + network
+    /// (connectivity failures get a slower ladder than server errors)
     /// failures, special-cases the 202 + lobby_forming response shape.
     ///
     /// Resource clients (<see cref="EventsClient"/>,
@@ -172,7 +210,7 @@ namespace Kraty
     public sealed class KratyClient : IDisposable
     {
         private const string SdkName = "app.kraty.sdk";
-        private const string SdkVersion = "0.9.0";
+        private const string SdkVersion = "0.30.0";
         private const string SdkUserAgent = SdkName + "/" + SdkVersion;
 
         private static readonly JsonSerializerSettings JsonOptions = new()
@@ -198,6 +236,9 @@ namespace Kraty
         private readonly Random _jitterRng = new();
         private readonly string _baseUrl;
         private readonly string _authHeader;
+        // Device telemetry headers (see KratyClientOptions.Platform / AppVersion).
+        private readonly string? _platform;
+        private readonly string? _appVersion;
         // Identity is mutable on purpose: the lazy EnsureIdentityAsync()
         // call may register or restore a player after construction and
         // mutate these in place so subsequent calls skip the round-trip.
@@ -225,6 +266,8 @@ namespace Kraty
 
             _baseUrl = opts.BaseUrl.TrimEnd('/');
             _authHeader = $"Bearer {opts.ApiKey}";
+            _platform = NormalizePlatform(opts.Platform) ?? DetectPlatform();
+            _appVersion = string.IsNullOrWhiteSpace(opts.AppVersion) ? DetectAppVersion() : opts.AppVersion!.Trim();
             _playerSecret = string.IsNullOrEmpty(opts.PlayerSecret) ? null : opts.PlayerSecret;
             _activeExternalPlayerId = string.IsNullOrEmpty(opts.ActiveExternalPlayerId)
                 ? null
@@ -247,6 +290,51 @@ namespace Kraty
                 // Never force-register during catch-up: only the current active player.
                 getActivePlayerId: () => Task.FromResult(_activeExternalPlayerId),
                 readEventLeaderboard: ReadEventLeaderboardStatusAsync);
+        }
+
+        // Same slug rule the backend applies; anything else is dropped, not sent.
+        private static readonly System.Text.RegularExpressions.Regex PlatformKey =
+            new("^[a-z0-9][a-z0-9_-]{0,31}$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        private static string? NormalizePlatform(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var key = raw!.Trim().ToLowerInvariant();
+            return PlatformKey.IsMatch(key) ? key : null;
+        }
+
+        // Inside Unity, Application.platform names the device the build runs
+        // on; the editor reports `editor` so QA sessions don't pollute the
+        // per-platform numbers. Plain .NET (tests, tools) reports nothing.
+        private static string? DetectPlatform()
+        {
+#if UNITY_5_3_OR_NEWER
+            switch (UnityEngine.Application.platform)
+            {
+                case UnityEngine.RuntimePlatform.IPhonePlayer: return "ios";
+                case UnityEngine.RuntimePlatform.Android: return "android";
+                case UnityEngine.RuntimePlatform.WebGLPlayer: return "web";
+                case UnityEngine.RuntimePlatform.WindowsPlayer: return "windows";
+                case UnityEngine.RuntimePlatform.OSXPlayer: return "macos";
+                case UnityEngine.RuntimePlatform.LinuxPlayer: return "linux";
+                case UnityEngine.RuntimePlatform.WindowsEditor:
+                case UnityEngine.RuntimePlatform.OSXEditor:
+                case UnityEngine.RuntimePlatform.LinuxEditor: return "editor";
+                default: return null;
+            }
+#else
+            return null;
+#endif
+        }
+
+        private static string? DetectAppVersion()
+        {
+#if UNITY_5_3_OR_NEWER
+            var v = UnityEngine.Application.version;
+            return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
+#else
+            return null;
+#endif
         }
 
         // Probe an event board's finalized status + reason + the caller's self
@@ -515,7 +603,13 @@ namespace Kraty
                     var wrapped = new KratyNetworkError(ex.Message, ex);
                     if (attempt < _retry.Attempts)
                     {
-                        await SleepBackoffAsync(attempt, null, cancellationToken).ConfigureAwait(false);
+                        // A connectivity-class failure never reached the
+                        // backend, so it gets the slower ladder (see
+                        // RetryConfig.OfflineInitialDelay).
+                        var baseDelay = IsConnectivityFailure(ex)
+                            ? _retry.OfflineInitialDelay
+                            : _retry.InitialDelay;
+                        await SleepBackoffAsync(attempt, null, cancellationToken, baseDelay).ConfigureAwait(false);
                         lastErr = wrapped;
                         continue;
                     }
@@ -536,6 +630,14 @@ namespace Kraty
             req.Headers.TryAddWithoutValidation("authorization", _authHeader);
             req.Headers.TryAddWithoutValidation("accept", "application/json");
             req.Headers.TryAddWithoutValidation("x-kraty-sdk", SdkUserAgent);
+            if (!string.IsNullOrEmpty(_platform))
+            {
+                req.Headers.TryAddWithoutValidation("x-kraty-platform", _platform);
+            }
+            if (!string.IsNullOrEmpty(_appVersion))
+            {
+                req.Headers.TryAddWithoutValidation("x-kraty-app-version", _appVersion);
+            }
             var secret = _playerSecret;
             if (!string.IsNullOrEmpty(secret))
             {
@@ -605,7 +707,53 @@ namespace Kraty
             return node;
         }
 
-        private async Task SleepBackoffAsync(int attempt, HttpResponseMessage? res, CancellationToken cancellationToken)
+        /// <summary>
+        /// True when the exception chain says the request never reached
+        /// a server: the hostname did not resolve, or there was no route
+        /// to the network. Distinguished from "the server answered badly"
+        /// so <see cref="RequestAsync{T}"/> can back off on a slower
+        /// ladder. Walks the whole chain because Mono's HTTP stack nests
+        /// the real cause under HttpRequestException -> WebException.
+        /// </summary>
+        private static bool IsConnectivityFailure(Exception? ex)
+        {
+            for (var e = ex; e != null; e = e.InnerException)
+            {
+                if (e is WebException we)
+                {
+                    switch (we.Status)
+                    {
+                        case WebExceptionStatus.NameResolutionFailure:
+                        case WebExceptionStatus.ProxyNameResolutionFailure:
+                        case WebExceptionStatus.ConnectFailure:
+                            return true;
+                    }
+                }
+
+                if (e is SocketException se)
+                {
+                    switch (se.SocketErrorCode)
+                    {
+                        case SocketError.HostNotFound:
+                        case SocketError.TryAgain:
+                        case SocketError.NoData:
+                        case SocketError.NoRecovery:
+                        case SocketError.HostUnreachable:
+                        case SocketError.NetworkUnreachable:
+                        case SocketError.NetworkDown:
+                            return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        private async Task SleepBackoffAsync(
+            int attempt,
+            HttpResponseMessage? res,
+            CancellationToken cancellationToken,
+            TimeSpan? baseDelay = null
+        )
         {
             if (res?.Headers.RetryAfter is RetryConditionHeaderValue ra)
             {
@@ -625,7 +773,7 @@ namespace Kraty
                 }
             }
 
-            var baseMs = _retry.InitialDelay.TotalMilliseconds * Math.Pow(2, attempt - 1);
+            var baseMs = (baseDelay ?? _retry.InitialDelay).TotalMilliseconds * Math.Pow(2, attempt - 1);
             if (baseMs > _retry.MaxDelay.TotalMilliseconds) baseMs = _retry.MaxDelay.TotalMilliseconds;
             double jittered;
             lock (_jitterRng)
