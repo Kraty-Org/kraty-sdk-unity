@@ -38,6 +38,18 @@ static Task<Kraty> ConnectAsPlayerAsync(KratyClientOptions opts, string? externa
 Task<List<EventListing>> ListForPlayerAsync(string? @as = null, CancellationToken ct = default)
 Task<StartAttemptResponse> StartAsync(string eventKey, Dictionary<string, object?>? playerContext = null, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
 Task<ProgressResult> ProgressAsync(string eventKey, string attemptId, ProgressInput input, string? @as = null, CancellationToken ct = default)
+
+// Co-op team events (listing / start / progress / finish also carry `Teams`; the listing carries `TeamFormation` and `TeamOptions`;
+// ProgressInput.EventTeamId names a partner bar)
+Task<EventTeamMembersPage> TeamMembersAsync(string eventTeamId, string? cursor = null, int? limit = null, string? @as = null, CancellationToken ct = default)
+Task<TeamMatchResult> MatchTeamAsync(string eventKey, string? @as = null, CancellationToken ct = default)
+Task<PartnerInvite> InvitePartnerAsync(string eventKey, string? externalPlayerId = null, string? friendCode = null, string? @as = null, CancellationToken ct = default)
+Task<List<PartnerInvite>> PartnerInvitesAsync(string eventKey, string direction = "in", string? @as = null, CancellationToken ct = default)
+Task<PartnerInvite> AcceptInviteAsync(string eventKey, string eventTeamId, string? @as = null, CancellationToken ct = default)
+Task<PartnerInvite> DeclineInviteAsync(string eventKey, string eventTeamId, string? @as = null, CancellationToken ct = default)
+Task<PartnerInvite> CancelInviteAsync(string eventKey, string eventTeamId, string? @as = null, CancellationToken ct = default)
+Task<RandomPartnerResult> RandomPartnerAsync(string eventKey, string? @as = null, CancellationToken ct = default)
+Task<List<PartnerSuggestion>> PartnerSuggestionsAsync(string eventKey, int? limit = null, string? @as = null, CancellationToken ct = default)
 ```
 
 ## `kraty.Leaderboards`: `LeaderboardsClient`
@@ -46,6 +58,7 @@ The dashboard-configured cross-event boards (weekly / monthly /
 all-time, optionally segmented). Addressed by stable game-scoped
 **key**. Wire endpoints:
 
+- `GET /sdk/v1/leaderboards` (list the game's boards)
 - `GET /sdk/v1/leaderboards/:key`
 - `GET /sdk/v1/leaderboards/:key/standings`
 - `GET /sdk/v1/leaderboards/:key/periods`
@@ -53,6 +66,7 @@ all-time, optionally segmented). Addressed by stable game-scoped
 - `POST /sdk/v1/players/:externalId/leaderboards/:key/score`
 
 ```csharp
+Task<List<LeaderboardSummary>> ListAsync(CancellationToken ct = default)
 Task<Leaderboard>            ReadAsync(string key, LeaderboardReadOptions? opts = null, CancellationToken ct = default)
 Task<Leaderboard>            JoinAsync(string key, LeaderboardJoinOptions? opts = null, CancellationToken ct = default)
 Task<BoardStandings>         StandingsAsync(string key, StandingsReadOptions? opts = null, CancellationToken ct = default)
@@ -159,6 +173,122 @@ Task<List<PlayerWalletHolding>> ListAsync(string? @as = null, CancellationToken 
 Task<DebitWalletResult>         DebitAsync(string economyKey, DebitWalletInput input, string? @as = null, CancellationToken ct = default)
 ```
 
+## `kraty.DailyLogin`: `DailyLoginClient`
+
+```csharp
+Task<DailyLogin?> ReadAsync(string? @as = null, CancellationToken ct = default)
+```
+
+`GET /sdk/v1/players/:p/daily-login`. The game's daily login calendar:
+`Days[{ Day, Entries }]`, `AfterLastDay`, `LoginStreak`, `CurrentDay`,
+`PaidToday`, `TodayGrantId`, `NextDayAt`, `ItemKey`. `null` when the game
+has none or it is off for the key's environment. Read-only: the request's
+session is what pays today's reward (a `daily_login` grant).
+
+## `kraty.Guilds`: `GuildsClient`
+
+```csharp
+Task<GuildClientConfig> ConfigAsync(string? @as = null, CancellationToken ct = default)
+Task<MyGuild?> MineAsync(...)
+Task<GuildDetail> GetAsync(string guildId, ...)
+Task<List<GuildSummary>> SearchAsync(string query, string? country = null, int? limit = null, ...)
+Task<GuildSearchPage> SearchPageAsync(string query, string? country = null, int? limit = null, int? offset = null, ...) // { Guilds, NextOffset }
+Task<List<RecommendedGuild>> RecommendedAsync(string? country = null, int? limit = null, ...)
+Task<MyGuild> CreateAsync(GuildProfileInput input, ...)
+Task<GuildJoinResult> JoinAsync(string guildId, string? message = null, ...)
+Task<List<GuildJoinRequest>> MyRequestsAsync(...)
+Task CancelRequestAsync(string requestId, ...)
+Task<GuildDetail> UpdateProfileAsync(GuildProfileInput patch, ...)
+Task<GuildLeaveResult> LeaveAsync(...)
+Task<List<GuildJoinRequest>> RequestsAsync(...)
+Task<GuildDetail> AcceptRequestAsync(string requestId, ...)
+Task DeclineRequestAsync(string requestId, ...)
+Task<GuildDetail> KickAsync / PromoteAsync / DemoteAsync(string memberExternalId, ...)
+Task<GuildDetail> TransferLeadershipAsync(string memberExternalId, ...)
+Task<GuildHelpOverview> HelpAsync(...)
+Task<GuildHelpRequest> RequestHelpAsync(string type, string resourceKey, int amount, ...)
+Task<GuildHelpDonation> DonateAsync(string requestId, int? amount = null, ...)
+Task<GuildHelpRequest> CancelHelpAsync(string requestId, ...)
+```
+
+`/sdk/v1/players/:p/guild*` and `/guilds*` (docs/25). Every method ends with
+`string? @as = null, CancellationToken ct = default`.
+
+## `kraty.Chat`: `ChatClient`
+
+```csharp
+Task<ChatClientConfig> ConfigAsync(...)                         // kinds, channels, message rules, rate limit, Preferences, Status
+Task<ChatPreferences> PreferencesAsync(...)
+Task<ChatPreferences> SetPreferencesAsync(ChatPreferencesUpdate update, ...)   // only assigned props sent; ProfanityFilter = null clears
+Task<ChatConversationPage> ConversationsAsync(string? kind = null, int? limit = null, int? offset = null, ...) // { Conversations, NextOffset }
+Task<ChatUnread> UnreadAsync(...)                               // { Total, Conversations, ByKind }
+Task<ChatConversation> ConversationAsync(string conversationId, ...)          // Members set for groups
+Task<ChatConversation> OpenDirectAsync(string? externalPlayerId = null, string? friendCode = null, ...) // exactly one
+Task<ChatConversation> CreateGroupAsync(string title, IEnumerable<string>? externalPlayerIds = null, Dictionary<string, object?>? metadata = null, ...)
+Task<ChatConversation> UpdateGroupAsync(string conversationId, string? title = null, Dictionary<string, object?>? metadata = null, ...)
+Task<ChatConversation> AddMembersAsync(string conversationId, IEnumerable<string> externalPlayerIds, ...)
+Task<ChatMemberRemoved> RemoveMemberAsync(string conversationId, string externalPlayerId, ...)
+Task<ChatConversation> SetRoleAsync(string conversationId, string externalPlayerId, string role, ...) // owner | admin | member
+Task<ChatLeaveResult> LeaveAsync(string conversationId, ...)
+Task<ChatConversation> GuildAsync(...)                          // 409 conflict when guildless
+Task<List<ChatConversation>> ChannelsAsync(...)
+Task<ChatConversation> ChannelAsync(string channelKey, ...)
+Task<ChatMessagePage> MessagesAsync(string conversationId, long? before = null, long? after = null, int? limit = null, ...) // oldest→newest; { Messages, HasMore }
+Task<ChatMessage> SendAsync(string conversationId, string text, string? replyToId = null, string? clientMessageId = null, ...)
+Task<ChatMessage> SendCustomAsync(string conversationId, string customType, object? payload, string? text = null, string? replyToId = null, string? clientMessageId = null, ...)
+Task<ChatMessage> EditMessageAsync(string conversationId, string messageId, string text, ...) // own message, within Messages.EditWindowSeconds
+Task<ChatMessageDeleted> DeleteMessageAsync(string conversationId, string messageId, ...)
+Task<ChatReadResult> MarkReadAsync(string conversationId, long seq, ...)      // { LastReadSeq }
+Task TypingAsync(string conversationId, ...)
+Task<ChatConversation> SetConversationSettingsAsync(string conversationId, ChatConversationSettings settings, ...) // MutedUntil (null = unmute), Hidden
+Task<ChatStream> LiveAsync(IEnumerable<string>? channels = null, Action<ChatStream>? configure = null, ...)
+```
+
+`/sdk/v1/players/:p/chat/*` (docs/26). Every method ends with
+`string? @as = null, CancellationToken ct = default`. Chat off for the game =
+`KratyApiError` `403 chat_disabled`. `SendAsync` / `SendCustomAsync` fill
+`clientMessageId` with a fresh GUID when you pass none, so a retried send is
+idempotent. `payload` / `metadata` keep their keys exactly (no camelCasing).
+`EditMessageAsync` (`PATCH .../messages/:messageId` `{ text }`) edits your own
+message while `ChatClientConfig.Messages.EditWindowSeconds` (0 = editing off)
+has not elapsed; the result has `ChatMessage.EditedAt` (ISO string, null =
+never edited) set. Otherwise `403 chat_edit_not_allowed`; the filter and
+`chat_message_rejected` / `chat_message_invalid` / 429 behave as on send.
+
+`KratyClientOptions.ChatProfanityFilter` (`bool?`, default null): when set,
+every chat request and the stream send `X-Kraty-Chat-Filter: on|off` (and
+`?filter=on|off` on the stream URL); null = the player's saved preference,
+then the kind's default.
+
+`ChatStream` (SSE, `GET /chat/stream?channels=a,b`): typed callbacks
+`OnReady(ChatStreamReady)`, `OnMessage(ChatMessage)`,
+`OnMessageEdited(ChatMessage)` (`message_edited`, the full updated message),
+`OnMessageDeleted(ChatMessageDeletedEvent)`, `OnTyping(ChatTypingEvent)`,
+`OnRead(ChatReadEvent)`, `OnConversationAdded(ChatConversationAddedEvent)`,
+`OnConversationUpdated(ChatConversationUpdatedEvent)`,
+`OnConversationRemoved(ChatConversationRemovedEvent)`,
+`OnRestriction(ChatRestrictionEvent)`,
+`OnRestrictionLifted(ChatRestrictionLiftedEvent)`, `OnClose(ChatCloseEvent)`;
+plus raw `OnEvent(ChatStreamEvent)`, `OnError(Exception)`, the `Ready`
+payload, `Task CancelAsync()` / `void Dispose()`. Set callbacks inside
+`configure` (runs before the read loop starts). No auto-reconnect: on close,
+reopen and catch up with `MessagesAsync(id, after: lastSeq)`. Event names:
+`ChatStreamEventKind` consts.
+
+## `kraty.Moderation`: `ModerationClient`
+
+```csharp
+Task<MyReport> ReportAsync(ReportPlayerInput input, ...)        // TargetExternalPlayerId, Category, Context?, Comment?, ConversationId?, MessageIds?, GuildId?
+Task<List<MyReport>> ReportsAsync(int? limit = null, ...)
+Task<ModerationStatus> StatusAsync(...)                         // CanChat, CanPost, MutedUntil, ChatBannedUntil, Restrictions
+Task<Restriction> AcknowledgeWarningAsync(string restrictionId, ...)
+```
+
+`/sdk/v1/players/:p/reports` and `/moderation/*`; works in every game (no
+chat add-on needed). Every method ends with `string? @as = null,
+CancellationToken ct = default`. Category / context values:
+`ReportCategory` and `ReportContext` consts.
+
 ## `kraty.Players`: `PlayersClient`
 
 ```csharp
@@ -191,15 +321,32 @@ PlayerPrefsSecretStore        // Unity, wraps UnityEngine.PlayerPrefs (default o
 
 `Attempt`, `StartAttemptResponse`, `ProgressResult`, `MilestoneFired`,
 `EventListing`, `EntryCost`, `EntryCostCurrency`, `EntryCostItem`,
-`Leaderboard`, `EventLeaderboard`, `LeaderboardEntry`,
+`Leaderboard`, `LeaderboardSummary`, `EventLeaderboard`, `LeaderboardEntry`,
 `LeaderboardSelf`, `ProgressionLimits`, `ProgressionBand`,
 `LeaderboardPeriod`, `LeaderboardPeriods`,
 `Grant`, `OpenCrateResponse`, `Lobby`, `ProgressInput`,
 `PlayerRegistration`, `PlayerItemHolding`, `PlayerWalletHolding`,
+`DailyLogin`, `DailyLoginDay`,
+`GuildClientConfig`, `GuildSummary`, `RecommendedGuild`, `GuildMember`,
+`GuildDetail`, `MyGuild`, `GuildJoinRequest`, `GuildJoinResult`, `GuildLeaveResult`,
+`GuildProfileInput`, `GuildHelpRequest`, `GuildHelpOverview`,
+`GuildHelpDonation`, `GuildPlayerRef`,
+`ChatClientConfig`, `ChatKindConfig`, `ChatMessageRules`, `ChatCustomType`, `ChatRateLimit`,
+`ChatConversation`, `ChatConversationPage`, `ChatMessage`, `ChatMessageSender`, `ChatMessagePage`,
+`ChatMember`, `ChatPeer`, `ChatPlayerRef`, `ChatChannel`, `ChatRequirement`, `ChatPostDenied`,
+`ChatPreferences`, `ChatPreferencesUpdate`, `ChatConversationSettings`, `ChatUnread`,
+`ChatLeaveResult`, `ChatMemberRemoved`, `ChatMessageDeleted`, `ChatReadResult`,
+`ChatStreamEvent`, `ChatStreamReady`, `ChatStreamChannel`, `ChatMessageDeletedEvent`, `ChatTypingEvent`,
+`ChatReadEvent`, `ChatConversationAddedEvent`, `ChatConversationUpdatedEvent`,
+`ChatConversationRemovedEvent`, `ChatRestrictionEvent`, `ChatRestrictionLiftedEvent`, `ChatCloseEvent`,
+`MyReport`, `ReportPlayerInput`, `ModerationStatus`, `Restriction`,
 `ConsumeItemInput`, `ConsumeItemResult`, `DebitWalletInput`,
 `DebitWalletResult`, `Catalog`, `CatalogItem`, `CatalogCurrency`,
 `RewardBundlePreview`, `RewardEntryPreview`, `RewardPolicySummary`,
-`StoredIdentity`.
+`StoredIdentity`, `TeamSeatView`, `TeamGoal`, `TeamSeatMilestone`,
+`TeamSeatState`, `TeamClientOptions`, `TeamRollup`, `TeamRollupMilestone`, `LeaderboardEntryTeam`,
+`EventTeamMember`, `EventTeamMembersPage`, `TeamMatchResult`, `PartnerPlayer`,
+`PartnerInvite`, `RandomPartnerResult`, `PartnerSuggestion`.
 
 ## Errors
 

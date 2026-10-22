@@ -38,11 +38,15 @@ namespace Kraty
         [JsonProperty("attempt")] public Attempt Attempt { get; set; } = new();
         [JsonProperty("leaderboardId")] public string LeaderboardId { get; set; } = string.Empty;
         [JsonProperty("windowEndsAt")] public string WindowEndsAt { get; set; } = string.Empty;
+        /// <summary>Team events only: the player's team seats in this window. Null otherwise.</summary>
+        [JsonProperty("teams")] public List<TeamSeatView>? Teams { get; set; }
     }
 
     public sealed class ProgressResult
     {
         [JsonProperty("attempt")] public Attempt Attempt { get; set; } = new();
+        /// <summary>Team events only: the player's team seats after this write. Null otherwise.</summary>
+        [JsonProperty("teams")] public List<TeamSeatView>? Teams { get; set; }
 
         /// <summary>
         /// Milestones whose threshold was crossed by THIS progress
@@ -65,6 +69,8 @@ namespace Kraty
         [JsonProperty("attempt")] public Attempt Attempt { get; set; } = new();
 
         [JsonProperty("outcome")] public string Outcome { get; set; } = "completed";
+        /// <summary>Team events only: the player's team seats. Null otherwise.</summary>
+        [JsonProperty("teams")] public List<TeamSeatView>? Teams { get; set; }
     }
 
     /// <summary>
@@ -296,6 +302,52 @@ namespace Kraty
         [JsonProperty("attemptQuota")] public AttemptQuota? AttemptQuota { get; set; }
 
         /// <summary>
+        /// Score that ends a <c>first_to_score</c> session: the race's
+        /// finish line. Draw progress toward it; <c>null</c> when the
+        /// event has no such target.
+        /// </summary>
+        [JsonProperty("goal")] public int? Goal { get; set; }
+
+        /// <summary>
+        /// Player-condition tree that gates the event's visibility
+        /// (<see cref="EntryRequirement"/> gates joining). The server
+        /// enforces it on start; surfaced so the UI can show why an event
+        /// is locked. <c>null</c> when there's no gate.
+        /// </summary>
+        [JsonProperty("unlockCondition")] public Dictionary<string, JToken>? UnlockCondition { get; set; }
+
+        /// <summary>
+        /// Length of one attempt in seconds. It's also cut short by the
+        /// window end (<see cref="EndsAt"/>) and, for session events, by
+        /// the session ending. <c>null</c> on backends older than the field.
+        /// </summary>
+        [JsonProperty("attemptDurationSeconds")] public int? AttemptDurationSeconds { get; set; }
+
+        /// <summary>
+        /// Team events only: the player's team seats in this window (score,
+        /// goal / boss HP, milestones, your contribution and rank). Null for
+        /// non-team events; empty while the player has no team.
+        /// </summary>
+        [JsonProperty("teams")] public List<TeamSeatView>? Teams { get; set; }
+
+        /// <summary>
+        /// Team events only: how teams form, i.e. what your UI does before
+        /// the player scores for a team. <c>external</c> (your server posts
+        /// rosters) and <c>attribute</c> (e.g. country) need nothing;
+        /// <c>auto_match</c>: <see cref="EventsClient.MatchTeamAsync"/> (or just
+        /// start); <c>partner_slots</c>: partner invites / random partner, then
+        /// pass <see cref="ProgressInput.EventTeamId"/>.
+        /// </summary>
+        [JsonProperty("teamFormation")] public string? TeamFormation { get; set; }
+
+        /// <summary>
+        /// Team events only: the formation's player-facing options (partner
+        /// cap, random partners, team size, the context keys a country team
+        /// reads), so the UI offers the right setup before the player has a team.
+        /// </summary>
+        [JsonProperty("teamOptions")] public TeamClientOptions? TeamOptions { get; set; }
+
+        /// <summary>
         /// True when <see cref="LeaderboardMode"/> is <c>lobby_matched</c>.
         /// Convenience flag for switching into a lobby-waiting view.
         /// </summary>
@@ -336,6 +388,21 @@ namespace Kraty
         /// <summary>LocalizedString.</summary>
         [JsonProperty("description")] public JToken? Description { get; set; }
         [JsonProperty("kind")] public string Kind { get; set; } = "currency";
+        /// <summary>A derived progression item's curve (<c>level</c> from <c>xp</c>); null otherwise.</summary>
+        [JsonProperty("derived")] public CatalogDerivedProgression? Derived { get; set; }
+    }
+
+    /// <summary>Each level of a derived item and the source balance that reaches it, lowest first.</summary>
+    public sealed class CatalogDerivedProgression
+    {
+        [JsonProperty("sourceKey")] public string SourceKey { get; set; } = string.Empty;
+        [JsonProperty("levels")] public List<CatalogDerivedLevel> Levels { get; set; } = new();
+    }
+
+    public sealed class CatalogDerivedLevel
+    {
+        [JsonProperty("level")] public int Level { get; set; }
+        [JsonProperty("sourceRequired")] public long SourceRequired { get; set; }
     }
 
     public sealed class Catalog
@@ -386,6 +453,19 @@ namespace Kraty
         /// self-context request, and on bot entries regardless.
         /// </summary>
         [JsonProperty("isSelf")] public bool IsSelf { get; set; }
+        /// <summary>
+        /// Team boards only: the event team behind this row (rows are
+        /// <c>kind: player</c>, rival bot teams <c>bot</c> with a null team).
+        /// </summary>
+        [JsonProperty("team")] public LeaderboardEntryTeam? Team { get; set; }
+    }
+
+    /// <summary>The event team behind a team-board row.</summary>
+    public sealed class LeaderboardEntryTeam
+    {
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        [JsonProperty("badge")] public string? Badge { get; set; }
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
     }
 
     public sealed class LeaderboardSelf
@@ -457,6 +537,32 @@ namespace Kraty
     }
 
     /// <summary>
+    /// One entry of <see cref="LeaderboardsClient.ListAsync"/>: a
+    /// dashboard-configured board the game can show, so clients discover
+    /// board keys instead of hard-coding them.
+    /// </summary>
+    public sealed class LeaderboardSummary
+    {
+        /// <summary>The board's stable game-scoped key; pass it to <see cref="LeaderboardsClient.ReadAsync"/>.</summary>
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        /// <summary>LocalizedString (string or object); see backend docs/02 § English-only v1.</summary>
+        [JsonProperty("name")] public JToken? Name { get; set; }
+        [JsonProperty("description")] public string? Description { get; set; }
+        /// <summary>One of <c>daily</c>, <c>weekly</c>, <c>monthly</c>, <c>never</c>.</summary>
+        [JsonProperty("resetCadence")] public string ResetCadence { get; set; } = string.Empty;
+        /// <summary>ISO timestamp the current period ends; <c>null</c> when the board never resets.</summary>
+        [JsonProperty("nextResetAt")] public string? NextResetAt { get; set; }
+        /// <summary><c>false</c> when only the studio's server may submit scores to this board.</summary>
+        [JsonProperty("acceptClientScores")] public bool AcceptClientScores { get; set; }
+        /// <summary>
+        /// <c>playerContext</c> fields that segment the board; pass one's
+        /// value as the segment on read / join / score. Progression
+        /// segments are resolved server-side and aren't listed.
+        /// </summary>
+        [JsonProperty("contextSegments")] public List<string> ContextSegments { get; set; } = new();
+    }
+
+    /// <summary>
     /// One snapshot period on a leaderboard. Returned by
     /// <see cref="LeaderboardsClient.ListPeriodsAsync"/>; pass
     /// <see cref="PeriodStartedAt"/> as <c>opts.Period</c> on
@@ -493,6 +599,8 @@ namespace Kraty
     {
         [JsonProperty("leaderboardId")] public string LeaderboardId { get; set; } = string.Empty;
         [JsonProperty("mode")] public string Mode { get; set; } = string.Empty;
+        /// <summary><c>player</c>, or <c>team</c> on a co-op team board (rows are teams; <c>Self</c> is your team).</summary>
+        [JsonProperty("participantScope")] public string? ParticipantScope { get; set; }
         [JsonProperty("finalized")] public bool Finalized { get; set; }
         /// <summary>Why the board finalized; one of the
         /// <see cref="FinalizationReason"/> constants
@@ -663,6 +771,164 @@ namespace Kraty
         [JsonProperty("metrics")] public Dictionary<string, double>? Metrics { get; set; }
         [JsonProperty("occurredAt")] public string? OccurredAt { get; set; }
         [JsonProperty("idempotencyKey")] public string? IdempotencyKey { get; set; }
+        /// <summary>
+        /// Team events: which of the player's teams this progress counts for.
+        /// Needed only when the player holds several seats and the event
+        /// routes to a chosen team (partner bars).
+        /// </summary>
+        [JsonProperty("eventTeamId", NullValueHandling = NullValueHandling.Ignore)] public string? EventTeamId { get; set; }
+    }
+
+    // ── Co-op team events ─────────────────────────────────────────────
+
+    /// <summary><see cref="EventListing.TeamOptions"/>: what a client needs to get a player onto a team.</summary>
+    public sealed class TeamClientOptions
+    {
+        [JsonProperty("maxMembers")] public int MaxMembers { get; set; }
+        /// <summary><c>auto_match</c>: players per matched team (2 on partner events); null otherwise.</summary>
+        [JsonProperty("teamSize")] public int? TeamSize { get; set; }
+        /// <summary><c>partner_slots</c>: partner bars a player may hold; null otherwise.</summary>
+        [JsonProperty("maxPartners")] public int? MaxPartners { get; set; }
+        /// <summary><c>partner_slots</c>: whether a random partner is offered; null otherwise.</summary>
+        [JsonProperty("allowRandom")] public bool? AllowRandom { get; set; }
+        /// <summary><c>attribute</c>: player-context keys the team is keyed by. The server-resolved <c>country</c> is never listed.</summary>
+        [JsonProperty("contextKeys")] public List<string> ContextKeys { get; set; } = new();
+    }
+
+    /// <summary>One of the player's team seats, as the events listing / start / progress / finish return it.</summary>
+    public sealed class TeamSeatView
+    {
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        [JsonProperty("teamKey")] public string TeamKey { get; set; } = string.Empty;
+        [JsonProperty("displayName")] public string DisplayName { get; set; } = string.Empty;
+        [JsonProperty("badge")] public string? Badge { get; set; }
+        [JsonProperty("formation")] public string Formation { get; set; } = string.Empty;
+        /// <summary><c>forming</c> (partner invite pending) / <c>active</c> / <c>closed</c>.</summary>
+        [JsonProperty("status")] public string Status { get; set; } = "active";
+        [JsonProperty("score")] public double Score { get; set; }
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
+        /// <summary>Null when the event has no team goal. <c>Remaining</c> is the boss HP.</summary>
+        [JsonProperty("goal")] public TeamGoal? Goal { get; set; }
+        [JsonProperty("milestones")] public List<TeamSeatMilestone> Milestones { get; set; } = new();
+        [JsonProperty("seat")] public TeamSeatState Seat { get; set; } = new();
+        /// <summary>The team board, once the team entered one.</summary>
+        [JsonProperty("leaderboardId")] public string? LeaderboardId { get; set; }
+        /// <summary>Your team's place on that board: live during the window, final after close.</summary>
+        [JsonProperty("boardRank")] public int? BoardRank { get; set; }
+        /// <summary>Partner events: your bar over all your pairs and its checkpoints.</summary>
+        [JsonProperty("rollup")] public TeamRollup? Rollup { get; set; }
+    }
+
+    public sealed class TeamGoal
+    {
+        [JsonProperty("target")] public double Target { get; set; }
+        [JsonProperty("remaining")] public double Remaining { get; set; }
+        [JsonProperty("completed")] public bool Completed { get; set; }
+    }
+
+    public sealed class TeamSeatMilestone
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        /// <summary>After goal scaling.</summary>
+        [JsonProperty("threshold")] public double Threshold { get; set; }
+        [JsonProperty("unlocked")] public bool Unlocked { get; set; }
+        /// <summary>You were paid this tier.</summary>
+        [JsonProperty("paid")] public bool Paid { get; set; }
+        /// <summary>Unlocked while you were on the team; pays once your own contribution reaches the minimum.</summary>
+        [JsonProperty("pendingMinContribution")] public bool PendingMinContribution { get; set; }
+    }
+
+    public sealed class TeamSeatState
+    {
+        [JsonProperty("seatId")] public string SeatId { get; set; } = string.Empty;
+        /// <summary><c>invited</c> / <c>active</c> / <c>left</c> / <c>removed</c>.</summary>
+        [JsonProperty("status")] public string Status { get; set; } = "active";
+        [JsonProperty("contribution")] public double Contribution { get; set; }
+        /// <summary>Your 1-based rank inside the team.</summary>
+        [JsonProperty("rank")] public int Rank { get; set; }
+        [JsonProperty("locked")] public bool Locked { get; set; }
+    }
+
+    public sealed class TeamRollup
+    {
+        [JsonProperty("value")] public double Value { get; set; }
+        [JsonProperty("milestones")] public List<TeamRollupMilestone> Milestones { get; set; } = new();
+    }
+
+    public sealed class TeamRollupMilestone
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("threshold")] public double Threshold { get; set; }
+        [JsonProperty("reached")] public bool Reached { get; set; }
+        [JsonProperty("paid")] public bool Paid { get; set; }
+    }
+
+    /// <summary>One teammate, as <see cref="EventsClient.TeamMembersAsync"/> returns them.</summary>
+    public sealed class EventTeamMember
+    {
+        [JsonProperty("externalPlayerId")] public string? ExternalPlayerId { get; set; }
+        [JsonProperty("name")] public string? Name { get; set; }
+        [JsonProperty("avatar")] public string? Avatar { get; set; }
+        [JsonProperty("contribution")] public double Contribution { get; set; }
+        [JsonProperty("rank")] public int Rank { get; set; }
+        [JsonProperty("status")] public string Status { get; set; } = "active";
+        [JsonProperty("isSelf")] public bool IsSelf { get; set; }
+    }
+
+    public sealed class EventTeamMembersPage
+    {
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        [JsonProperty("teamKey")] public string TeamKey { get; set; } = string.Empty;
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
+        [JsonProperty("members")] public List<EventTeamMember> Members { get; set; } = new();
+        /// <summary>Pass back as <c>cursor</c> for the next page; null on the last page.</summary>
+        [JsonProperty("nextCursor")] public string? NextCursor { get; set; }
+    }
+
+    /// <summary><see cref="EventsClient.MatchTeamAsync"/>: your auto-matched team.</summary>
+    public sealed class TeamMatchResult
+    {
+        [JsonProperty("windowId")] public string WindowId { get; set; } = string.Empty;
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        [JsonProperty("created")] public bool Created { get; set; }
+        [JsonProperty("teams")] public List<TeamSeatView> Teams { get; set; } = new();
+    }
+
+    public sealed class PartnerPlayer
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+    }
+
+    /// <summary>A partner invite (its id is the pair's <c>EventTeamId</c>).</summary>
+    public sealed class PartnerInvite
+    {
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        /// <summary><c>pending</c> / <c>accepted</c> / <c>declined</c> / <c>cancelled</c>.</summary>
+        [JsonProperty("status")] public string Status { get; set; } = "pending";
+        [JsonProperty("from")] public PartnerPlayer From { get; set; } = new();
+        [JsonProperty("to")] public PartnerPlayer To { get; set; } = new();
+        [JsonProperty("expiresAt")] public string? ExpiresAt { get; set; }
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        /// <summary>Set on an accept: your seats after it.</summary>
+        [JsonProperty("teams")] public List<TeamSeatView>? Teams { get; set; }
+    }
+
+    /// <summary><see cref="EventsClient.RandomPartnerAsync"/>: paired with someone waiting, or your bar waits.</summary>
+    public sealed class RandomPartnerResult
+    {
+        /// <summary><c>paired</c> or <c>waiting</c>.</summary>
+        [JsonProperty("status")] public string Status { get; set; } = "waiting";
+        [JsonProperty("eventTeamId")] public string EventTeamId { get; set; } = string.Empty;
+        [JsonProperty("teams")] public List<TeamSeatView> Teams { get; set; } = new();
+    }
+
+    public sealed class PartnerSuggestion
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        /// <summary>An accepted friend (friends are listed first).</summary>
+        [JsonProperty("isFriend")] public bool IsFriend { get; set; }
     }
 
     /// <summary>
@@ -913,6 +1179,41 @@ namespace Kraty
         [JsonProperty("metadata")] public Dictionary<string, JToken> Metadata { get; set; } = new();
         [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
         [JsonProperty("updatedAt")] public string UpdatedAt { get; set; } = string.Empty;
+    }
+
+    /// <summary>
+    /// The game's daily login calendar as the player sees it
+    /// (<c>GET /sdk/v1/players/:p/daily-login</c>). The server pays each
+    /// day's reward on the player's first session of that UTC day, as a
+    /// grant with <c>SourceKind == "daily_login"</c>; read this to draw
+    /// the calendar.
+    /// </summary>
+    public sealed class DailyLogin
+    {
+        /// <summary>Day 1 first; each day's reward entries as configured in the dashboard.</summary>
+        [JsonProperty("days")] public List<DailyLoginDay> Days { get; set; } = new();
+        /// <summary><c>restart</c>, <c>hold_last</c> or <c>stop</c>: what a streak longer than the calendar does.</summary>
+        [JsonProperty("afterLastDay")] public string AfterLastDay { get; set; } = "restart";
+        /// <summary>Progression item holding <see cref="CurrentDay"/>, for clients already reading the wallet.</summary>
+        [JsonProperty("itemKey")] public string ItemKey { get; set; } = string.Empty;
+        /// <summary>Consecutive UTC days with a session; 0 once a day was missed.</summary>
+        [JsonProperty("loginStreak")] public int LoginStreak { get; set; }
+        /// <summary>Calendar day the player is on (1..Days.Count); 0 without a streak.</summary>
+        [JsonProperty("currentDay")] public int CurrentDay { get; set; }
+        /// <summary>Whether today's reward has been granted already.</summary>
+        [JsonProperty("paidToday")] public bool PaidToday { get; set; }
+        /// <summary>The grant that paid today, to match against the grant list or inventory stream.</summary>
+        [JsonProperty("todayGrantId")] public string? TodayGrantId { get; set; }
+        /// <summary>ISO start of the next UTC day: when the next day's reward can be earned.</summary>
+        [JsonProperty("nextDayAt")] public string NextDayAt { get; set; } = string.Empty;
+    }
+
+    /// <summary>One day of a <see cref="DailyLogin"/> calendar.</summary>
+    public sealed class DailyLoginDay
+    {
+        [JsonProperty("day")] public int Day { get; set; }
+        /// <summary>Reward entries, e.g. <c>{ "type": "currency", "currencyKey": "gems", "amount": 10 }</c>.</summary>
+        [JsonProperty("entries")] public List<Dictionary<string, JToken>> Entries { get; set; } = new();
     }
 
     /// <summary>
@@ -1521,6 +1822,610 @@ namespace Kraty
     internal sealed class GiftEnvelope
     {
         [JsonProperty("gift")] public Gift? Gift { get; set; }
+    }
+
+    // ── Guilds (docs/25) ──────────────────────────────────────────────
+
+    /// <summary>Another player as guild screens show them.</summary>
+    public sealed class GuildPlayerRef
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+    }
+
+    /// <summary>A guild card: search results, recommendations, board rows.</summary>
+    public class GuildSummary
+    {
+        [JsonProperty("guildId")] public string GuildId { get; set; } = string.Empty;
+        [JsonProperty("name")] public string Name { get; set; } = string.Empty;
+        [JsonProperty("description")] public string? Description { get; set; }
+        /// <summary>Free-form key your game maps to emblem art.</summary>
+        [JsonProperty("badge")] public string? Badge { get; set; }
+        /// <summary>ISO-3166-1 alpha-2 country code (<c>PT</c>, <c>US</c>), or null.</summary>
+        [JsonProperty("country")] public string? Country { get; set; }
+        /// <summary><c>open</c> or <c>request</c>.</summary>
+        [JsonProperty("joinType")] public string JoinType { get; set; } = "open";
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
+        /// <summary>The fixed Kraty limit (50).</summary>
+        [JsonProperty("maxMembers")] public int MaxMembers { get; set; }
+        [JsonProperty("metadata")] public Dictionary<string, JToken> Metadata { get; set; } = new();
+        [JsonProperty("leader")] public GuildPlayerRef? Leader { get; set; }
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+    }
+
+    /// <summary>A recommended guild: <see cref="FriendCount"/> of your friends are in it.</summary>
+    public sealed class RecommendedGuild : GuildSummary
+    {
+        [JsonProperty("friendCount")] public int FriendCount { get; set; }
+    }
+
+    /// <summary>One member of a guild roster.</summary>
+    public sealed class GuildMember
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+        /// <summary><c>leader</c>, <c>co_leader</c> or <c>member</c>.</summary>
+        [JsonProperty("role")] public string Role { get; set; } = "member";
+        [JsonProperty("joinedAt")] public string JoinedAt { get; set; } = string.Empty;
+        [JsonProperty("lastSeenAt")] public string? LastSeenAt { get; set; }
+        [JsonProperty("online")] public bool Online { get; set; }
+        /// <summary>Donations this member made in this guild this guild week.</summary>
+        [JsonProperty("weeklyHelps")] public int WeeklyHelps { get; set; }
+    }
+
+    /// <summary>A guild with its roster (leader first, then co-leaders, members).</summary>
+    public sealed class GuildDetail : GuildSummary
+    {
+        [JsonProperty("members")] public List<GuildMember> Members { get; set; } = new();
+    }
+
+    public sealed class GuildMembership
+    {
+        [JsonProperty("role")] public string Role { get; set; } = "member";
+        [JsonProperty("joinedAt")] public string JoinedAt { get; set; } = string.Empty;
+        /// <summary>What your role may do in this game (<c>kick</c>, <c>promote</c>, …).</summary>
+        [JsonProperty("permissions")] public List<string> Permissions { get; set; } = new();
+    }
+
+    /// <summary>Your guild, your role and permissions.</summary>
+    public sealed class MyGuild
+    {
+        [JsonProperty("guild")] public GuildDetail Guild { get; set; } = new();
+        [JsonProperty("membership")] public GuildMembership Membership { get; set; } = new();
+    }
+
+    /// <summary>
+    /// The game's guild rules as this player sees them (unlock gate, cost,
+    /// roles, help settings, guild week). Kept as JSON objects for the nested
+    /// settings so new fields reach the game without an SDK update.
+    /// </summary>
+    public sealed class GuildClientConfig
+    {
+        [JsonProperty("enabled")] public bool Enabled { get; set; }
+        [JsonProperty("maxMembers")] public int MaxMembers { get; set; }
+        [JsonProperty("defaultJoinType")] public string DefaultJoinType { get; set; } = "open";
+        [JsonProperty("roles")] public Dictionary<string, List<string>> Roles { get; set; } = new();
+        /// <summary><c>{ active, itemKey, threshold, balance, eligible }</c>; <c>active: false</c> = no gate.</summary>
+        [JsonProperty("unlock")] public JObject Unlock { get; set; } = new();
+        [JsonProperty("createCost")] public List<JObject> CreateCost { get; set; } = new();
+        /// <summary>
+        /// Who takes <see cref="CreateCost"/> and donor-paid help from the player:
+        /// <c>platform</c> (Kraty debits it) or <c>studio</c> (your game manages
+        /// inventory itself, so Kraty charges nothing and you charge the player).
+        /// </summary>
+        [JsonProperty("costsChargedBy")] public string CostsChargedBy { get; set; } = "platform";
+        /// <summary><c>{ declinedRetryHours, maxPendingPerPlayer, ttlHours }</c>; an unanswered request expires <c>ttlHours</c> after it was made.</summary>
+        [JsonProperty("joinRequests")] public JObject JoinRequests { get; set; } = new();
+        [JsonProperty("leaveCooldownHours")] public int LeaveCooldownHours { get; set; }
+        [JsonProperty("kickRejoinBlockHours")] public int KickRejoinBlockHours { get; set; }
+        [JsonProperty("help")] public JObject Help { get; set; } = new();
+        /// <summary>The guild week <c>{ dayOfWeek, hour, minute, timezone, currentStart, currentEnd }</c>; the weekly donation cap counts over it.</summary>
+        [JsonProperty("week")] public JObject Week { get; set; } = new();
+    }
+
+    /// <summary>A request to join a <c>request</c>-type guild.</summary>
+    public sealed class GuildJoinRequest
+    {
+        [JsonProperty("requestId")] public string RequestId { get; set; } = string.Empty;
+        [JsonProperty("guild")] public JObject Guild { get; set; } = new();
+        [JsonProperty("player")] public GuildPlayerRef? Player { get; set; }
+        [JsonProperty("message")] public string? Message { get; set; }
+        /// <summary><c>pending</c>, <c>accepted</c>, <c>declined</c>, <c>cancelled</c> or <c>expired</c>.</summary>
+        [JsonProperty("status")] public string Status { get; set; } = "pending";
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        [JsonProperty("decidedAt")] public string? DecidedAt { get; set; }
+    }
+
+    /// <summary>Joined an open guild (<see cref="Guild"/>), or a request is waiting (<see cref="Request"/>).</summary>
+    public sealed class GuildJoinResult
+    {
+        /// <summary><c>joined</c> or <c>requested</c>.</summary>
+        [JsonProperty("status")] public string Status { get; set; } = string.Empty;
+        [JsonProperty("guild")] public MyGuild? Guild { get; set; }
+        [JsonProperty("request")] public GuildJoinRequest? Request { get; set; }
+    }
+
+    public sealed class GuildLeaveResult
+    {
+        [JsonProperty("guildId")] public string GuildId { get; set; } = string.Empty;
+        /// <summary>You were the last member: the guild is gone.</summary>
+        [JsonProperty("disbanded")] public bool Disbanded { get; set; }
+        /// <summary>Who leads now, when you were the leader.</summary>
+        [JsonProperty("newLeader")] public GuildPlayerRef? NewLeader { get; set; }
+    }
+
+    /// <summary>Input for <c>Guilds.CreateAsync</c> / <c>UpdateProfileAsync</c>; null fields are omitted.</summary>
+    public sealed class GuildProfileInput
+    {
+        [JsonProperty("name", NullValueHandling = NullValueHandling.Ignore)] public string? Name { get; set; }
+        [JsonProperty("description", NullValueHandling = NullValueHandling.Ignore)] public string? Description { get; set; }
+        [JsonProperty("badge", NullValueHandling = NullValueHandling.Ignore)] public string? Badge { get; set; }
+        [JsonProperty("country", NullValueHandling = NullValueHandling.Ignore)] public string? Country { get; set; }
+        [JsonProperty("joinType", NullValueHandling = NullValueHandling.Ignore)] public string? JoinType { get; set; }
+        [JsonProperty("metadata", NullValueHandling = NullValueHandling.Ignore)] public Dictionary<string, object?>? Metadata { get; set; }
+    }
+
+    public sealed class GuildHelpRequest
+    {
+        [JsonProperty("requestId")] public string RequestId { get; set; } = string.Empty;
+        [JsonProperty("requester")] public GuildPlayerRef? Requester { get; set; }
+        /// <summary><c>item</c> or <c>currency</c>.</summary>
+        [JsonProperty("type")] public string Type { get; set; } = "item";
+        [JsonProperty("resourceKey")] public string ResourceKey { get; set; } = string.Empty;
+        [JsonProperty("amountRequested")] public int AmountRequested { get; set; }
+        [JsonProperty("amountReceived")] public int AmountReceived { get; set; }
+        /// <summary><c>open</c>, <c>filled</c>, <c>cancelled</c> or <c>expired</c>.</summary>
+        [JsonProperty("status")] public string Status { get; set; } = "open";
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        [JsonProperty("expiresAt")] public string ExpiresAt { get; set; } = string.Empty;
+        [JsonProperty("donatedByMe")] public bool DonatedByMe { get; set; }
+    }
+
+    public sealed class GuildHelpOverview
+    {
+        [JsonProperty("requests")] public List<GuildHelpRequest> Requests { get; set; } = new();
+        [JsonProperty("myRequest")] public GuildHelpRequest? MyRequest { get; set; }
+        /// <summary>When you may ask again (null = now).</summary>
+        [JsonProperty("nextRequestAt")] public string? NextRequestAt { get; set; }
+        /// <summary>The weekly helps counter: <c>{ start, end, donationsMade, donationLimit }</c>.</summary>
+        [JsonProperty("week")] public JObject Week { get; set; } = new();
+    }
+
+    public sealed class GuildHelpDonation
+    {
+        [JsonProperty("donationId")] public string DonationId { get; set; } = string.Empty;
+        [JsonProperty("requestId")] public string RequestId { get; set; } = string.Empty;
+        [JsonProperty("amount")] public int Amount { get; set; }
+        [JsonProperty("grantId")] public string GrantId { get; set; } = string.Empty;
+        [JsonProperty("rewardGrantId")] public string? RewardGrantId { get; set; }
+        [JsonProperty("request")] public GuildHelpRequest Request { get; set; } = new();
+        [JsonProperty("week")] public JObject Week { get; set; } = new();
+    }
+
+    internal sealed class GuildListPayload<T>
+    {
+        [JsonProperty("guilds")] public List<T> Guilds { get; set; } = new();
+    }
+
+    /// <summary>A page of <c>SearchPageAsync</c> results.</summary>
+    public sealed class GuildSearchPage
+    {
+        [JsonProperty("guilds")] public List<GuildSummary> Guilds { get; set; } = new();
+        /// <summary>Pass as <c>offset</c> for the next page; null on the last page.</summary>
+        [JsonProperty("nextOffset")] public int? NextOffset { get; set; }
+    }
+
+    internal sealed class GuildRequestsPayload
+    {
+        [JsonProperty("requests")] public List<GuildJoinRequest> Requests { get; set; } = new();
+    }
+
+    // ── Chat (docs/26) ────────────────────────────────────────────────
+
+    /// <summary>A player as chat shows them (sender, typing indicator, member).</summary>
+    public class ChatPlayerRef
+    {
+        [JsonProperty("externalPlayerId")] public string ExternalPlayerId { get; set; } = string.Empty;
+        /// <summary>Name / avatar / country, or null when the player has none.</summary>
+        [JsonProperty("displayIdentity")] public PlayerIdentity? DisplayIdentity { get; set; }
+    }
+
+    /// <summary>The other player of a direct conversation.</summary>
+    public sealed class ChatPeer : ChatPlayerRef
+    {
+        [JsonProperty("online")] public bool Online { get; set; }
+    }
+
+    /// <summary>One member of a group (or other explicit-membership) conversation.</summary>
+    public sealed class ChatMember : ChatPlayerRef
+    {
+        /// <summary><c>owner</c>, <c>admin</c> or <c>member</c> in groups; the guild role in guild chat.</summary>
+        [JsonProperty("role")] public string Role { get; set; } = "member";
+        [JsonProperty("joinedAt")] public string JoinedAt { get; set; } = string.Empty;
+        [JsonProperty("online")] public bool Online { get; set; }
+    }
+
+    /// <summary>Who wrote a message.</summary>
+    public sealed class ChatMessageSender
+    {
+        /// <summary><c>player</c>, <c>server</c> (your backend) or <c>system</c> (Kraty).</summary>
+        [JsonProperty("kind")] public string Kind { get; set; } = "player";
+        /// <summary>The player, when <see cref="Kind"/> is <c>player</c>; null otherwise.</summary>
+        [JsonProperty("player")] public ChatPlayerRef? Player { get; set; }
+    }
+
+    /// <summary>
+    /// One chat message, its text already resolved for this viewer (the
+    /// profanity-filtered copy when the filter applies to them).
+    /// </summary>
+    public sealed class ChatMessage
+    {
+        [JsonProperty("messageId")] public string MessageId { get; set; } = string.Empty;
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        /// <summary>Position in the conversation: gapless, ascending; the <c>before</c> / <c>after</c> cursor.</summary>
+        [JsonProperty("seq")] public long Seq { get; set; }
+        /// <summary><c>text</c>, <c>custom</c> (a game card) or <c>system</c> (Kraty-written). Treat as an open set.</summary>
+        [JsonProperty("type")] public string Type { get; set; } = "text";
+        [JsonProperty("sender")] public ChatMessageSender Sender { get; set; } = new();
+        /// <summary>The text this viewer sees; null for a deleted message or a payload-only card. English fallback on <c>system</c>.</summary>
+        [JsonProperty("text")] public string? Text { get; set; }
+        /// <summary><see cref="Text"/> is the profanity-filtered copy.</summary>
+        [JsonProperty("filtered")] public bool Filtered { get; set; }
+        /// <summary><c>custom</c>: your card type. <c>system</c>: the event (<c>member_joined</c>, <c>gift_sent</c>, …).</summary>
+        [JsonProperty("customType")] public string? CustomType { get; set; }
+        /// <summary><c>custom</c>: the card payload. <c>system</c>: the event's data. Null when deleted.</summary>
+        [JsonProperty("payload")] public JToken? Payload { get; set; }
+        [JsonProperty("replyToId")] public string? ReplyToId { get; set; }
+        /// <summary>Echoed back to the sender only, to match a pending local message.</summary>
+        [JsonProperty("clientMessageId")] public string? ClientMessageId { get; set; }
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        /// <summary>When the sender last edited it (ISO 8601); null = never edited.</summary>
+        [JsonProperty("editedAt")] public string? EditedAt { get; set; }
+        [JsonProperty("deleted")] public bool Deleted { get; set; }
+    }
+
+    /// <summary>A posting gate on a progression item (level, trophies…).</summary>
+    public sealed class ChatRequirement
+    {
+        [JsonProperty("itemKey")] public string ItemKey { get; set; } = string.Empty;
+        [JsonProperty("threshold")] public double Threshold { get; set; }
+    }
+
+    /// <summary>A public channel the studio defined (<c>global</c>, <c>es</c>, <c>trade</c>…).</summary>
+    public sealed class ChatChannel
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("name")] public string Name { get; set; } = string.Empty;
+        [JsonProperty("description")] public string? Description { get; set; }
+        /// <summary><c>players</c> or <c>server_only</c> (announcements).</summary>
+        [JsonProperty("postPolicy")] public string PostPolicy { get; set; } = "players";
+        /// <summary>Minimum seconds between two messages from the same player; 0 = off.</summary>
+        [JsonProperty("slowModeSeconds")] public int SlowModeSeconds { get; set; }
+        /// <summary>Who may post (reading is open); null = everyone.</summary>
+        [JsonProperty("requirement")] public ChatRequirement? Requirement { get; set; }
+        [JsonProperty("metadata")] public Dictionary<string, JToken> Metadata { get; set; } = new();
+        /// <summary>Only on <see cref="ChatClientConfig.Channels"/>: the channel's filter mode (<c>always</c>, <c>on_by_default</c>, <c>off_by_default</c>).</summary>
+        [JsonProperty("profanityFilter")] public string? ProfanityFilter { get; set; }
+    }
+
+    /// <summary>Why the viewer can't post in a conversation.</summary>
+    public sealed class ChatPostDenied
+    {
+        [JsonProperty("code")] public string Code { get; set; } = string.Empty;
+        [JsonProperty("message")] public string Message { get; set; } = string.Empty;
+        [JsonProperty("details")] public JObject? Details { get; set; }
+    }
+
+    /// <summary>
+    /// A conversation as the viewer sees it. <see cref="Kind"/> is an open set
+    /// (<c>direct</c>, <c>group</c>, <c>guild</c>, <c>channel</c>…).
+    /// </summary>
+    public sealed class ChatConversation
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+        /// <summary>Group title, guild name, channel name; null for a direct conversation (show <see cref="Peer"/>).</summary>
+        [JsonProperty("title")] public string? Title { get; set; }
+        [JsonProperty("metadata")] public Dictionary<string, JToken> Metadata { get; set; } = new();
+        [JsonProperty("memberCount")] public int MemberCount { get; set; }
+        [JsonProperty("lastSeq")] public long LastSeq { get; set; }
+        [JsonProperty("lastMessageAt")] public string? LastMessageAt { get; set; }
+        [JsonProperty("lastMessage")] public ChatMessage? LastMessage { get; set; }
+        [JsonProperty("unreadCount")] public int UnreadCount { get; set; }
+        [JsonProperty("lastReadSeq")] public long LastReadSeq { get; set; }
+        /// <summary>Notifications muted by the player until then (their choice, not a moderation mute).</summary>
+        [JsonProperty("mutedUntil")] public string? MutedUntil { get; set; }
+        /// <summary>Direct conversations: the other player.</summary>
+        [JsonProperty("peer")] public ChatPeer? Peer { get; set; }
+        /// <summary>Guild conversations: the guild.</summary>
+        [JsonProperty("guildId")] public string? GuildId { get; set; }
+        /// <summary>Channel conversations: the channel definition.</summary>
+        [JsonProperty("channel")] public ChatChannel? Channel { get; set; }
+        /// <summary>The viewer's role here (group / guild role), or null.</summary>
+        [JsonProperty("role")] public string? Role { get; set; }
+        [JsonProperty("canPost")] public bool CanPost { get; set; }
+        /// <summary>Why the viewer can't post (blocked, friends only, requirement, announcements…).</summary>
+        [JsonProperty("postDenied")] public ChatPostDenied? PostDenied { get; set; }
+        /// <summary>The viewer may delete other players' messages here.</summary>
+        [JsonProperty("canModerate")] public bool CanModerate { get; set; }
+        /// <summary>The filter mode here: <c>always</c>, <c>on_by_default</c> or <c>off_by_default</c>.</summary>
+        [JsonProperty("filterMode")] public string FilterMode { get; set; } = string.Empty;
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        /// <summary>
+        /// The roster, on single-conversation reads of explicit-membership kinds
+        /// (groups); null on list reads and for guilds / channels / direct.
+        /// </summary>
+        [JsonProperty("members")] public List<ChatMember>? Members { get; set; }
+    }
+
+    /// <summary>A page of the inbox.</summary>
+    public sealed class ChatConversationPage
+    {
+        [JsonProperty("conversations")] public List<ChatConversation> Conversations { get; set; } = new();
+        /// <summary>Pass as <c>offset</c> for the next page; null on the last page.</summary>
+        [JsonProperty("nextOffset")] public int? NextOffset { get; set; }
+    }
+
+    /// <summary>A page of messages, oldest to newest.</summary>
+    public sealed class ChatMessagePage
+    {
+        [JsonProperty("messages")] public List<ChatMessage> Messages { get; set; } = new();
+        /// <summary>More messages exist past this page in the direction you paged.</summary>
+        [JsonProperty("hasMore")] public bool HasMore { get; set; }
+    }
+
+    /// <summary>Unread totals for a badge: muted conversations don't count.</summary>
+    public sealed class ChatUnread
+    {
+        /// <summary>Unread messages across the inbox.</summary>
+        [JsonProperty("total")] public int Total { get; set; }
+        /// <summary>Conversations with at least one unread message.</summary>
+        [JsonProperty("conversations")] public int Conversations { get; set; }
+        /// <summary>Unread messages per conversation kind.</summary>
+        [JsonProperty("byKind")] public Dictionary<string, int> ByKind { get; set; } = new();
+    }
+
+    /// <summary>The player's saved chat choices.</summary>
+    public sealed class ChatPreferences
+    {
+        /// <summary>Saved filter choice; null = each conversation kind's default.</summary>
+        [JsonProperty("profanityFilter")] public bool? ProfanityFilter { get; set; }
+        /// <summary><c>everyone</c>, <c>friends</c> or <c>nobody</c>.</summary>
+        [JsonProperty("allowDirectFrom")] public string AllowDirectFrom { get; set; } = "everyone";
+    }
+
+    /// <summary>
+    /// Patch for <c>Chat.SetPreferencesAsync</c>. Only the properties you
+    /// assign are sent; assigning <see cref="ProfanityFilter"/> = <c>null</c>
+    /// clears the saved choice back to the kinds' defaults.
+    /// </summary>
+    public sealed class ChatPreferencesUpdate
+    {
+        private bool? _profanityFilter;
+        internal bool HasProfanityFilter { get; private set; }
+
+        /// <summary>true / false, or null to clear (sent whenever assigned).</summary>
+        public bool? ProfanityFilter
+        {
+            get => _profanityFilter;
+            set { _profanityFilter = value; HasProfanityFilter = true; }
+        }
+
+        /// <summary><c>everyone</c>, <c>friends</c> or <c>nobody</c>; null = unchanged.</summary>
+        public string? AllowDirectFrom { get; set; }
+    }
+
+    /// <summary>
+    /// Patch for <c>Chat.SetConversationSettingsAsync</c>. Only the properties
+    /// you assign are sent; assigning <see cref="MutedUntil"/> = <c>null</c>
+    /// unmutes.
+    /// </summary>
+    public sealed class ChatConversationSettings
+    {
+        private System.DateTimeOffset? _mutedUntil;
+        internal bool HasMutedUntil { get; private set; }
+
+        /// <summary>Mute notifications until then, or null to unmute (sent whenever assigned).</summary>
+        public System.DateTimeOffset? MutedUntil
+        {
+            get => _mutedUntil;
+            set { _mutedUntil = value; HasMutedUntil = true; }
+        }
+
+        /// <summary>Hide the conversation from the inbox (it comes back on a new message); null = unchanged.</summary>
+        public bool? Hidden { get; set; }
+    }
+
+    /// <summary>
+    /// One conversation kind's settings in <see cref="ChatClientConfig.Kinds"/>.
+    /// The typed properties cover the built-in kinds; anything else lands in
+    /// <see cref="Extra"/>.
+    /// </summary>
+    public sealed class ChatKindConfig
+    {
+        [JsonProperty("enabled")] public bool Enabled { get; set; }
+        /// <summary><c>always</c>, <c>on_by_default</c> or <c>off_by_default</c>.</summary>
+        [JsonProperty("profanityFilter")] public string ProfanityFilter { get; set; } = string.Empty;
+        /// <summary><c>direct</c>: <c>friends</c> or <c>anyone</c>.</summary>
+        [JsonProperty("allowFrom")] public string? AllowFrom { get; set; }
+        /// <summary><c>group</c>: most members one group may have.</summary>
+        [JsonProperty("maxMembers")] public int? MaxMembers { get; set; }
+        /// <summary><c>group</c>: most groups one player may belong to.</summary>
+        [JsonProperty("maxGroupsPerPlayer")] public int? MaxGroupsPerPlayer { get; set; }
+        /// <summary><c>group</c>: who can be added: <c>friends</c> or <c>anyone</c>.</summary>
+        [JsonProperty("invitePolicy")] public string? InvitePolicy { get; set; }
+        /// <summary><c>guild</c>: leaders and co-leaders may delete any message.</summary>
+        [JsonProperty("officersCanDelete")] public bool? OfficersCanDelete { get; set; }
+        /// <summary><c>guild</c>: Kraty posts system messages for joins, leaves, help requests.</summary>
+        [JsonProperty("systemMessages")] public bool? SystemMessages { get; set; }
+        /// <summary>Settings this SDK version doesn't model.</summary>
+        [JsonExtensionData] public IDictionary<string, JToken> Extra { get; set; } = new Dictionary<string, JToken>();
+    }
+
+    /// <summary>A game-defined card type for <c>Chat.SendCustomAsync</c>.</summary>
+    public sealed class ChatCustomType
+    {
+        [JsonProperty("key")] public string Key { get; set; } = string.Empty;
+        [JsonProperty("description")] public string? Description { get; set; }
+        [JsonProperty("maxPayloadBytes")] public int MaxPayloadBytes { get; set; }
+        /// <summary>Optional JSON Schema the payload must match.</summary>
+        [JsonProperty("schema")] public JToken? Schema { get; set; }
+    }
+
+    public sealed class ChatMessageRules
+    {
+        [JsonProperty("maxLength")] public int MaxLength { get; set; }
+        /// <summary>When false, links in text are masked.</summary>
+        [JsonProperty("allowLinks")] public bool AllowLinks { get; set; }
+        [JsonProperty("customTypes")] public List<ChatCustomType> CustomTypes { get; set; } = new();
+        /// <summary>Seconds after sending during which a player may edit their message; 0 = editing off.</summary>
+        [JsonProperty("editWindowSeconds")] public int EditWindowSeconds { get; set; }
+    }
+
+    public sealed class ChatRateLimit
+    {
+        [JsonProperty("messagesPerMinute")] public int MessagesPerMinute { get; set; }
+    }
+
+    /// <summary>
+    /// The game's chat rules as this player sees them, plus their preferences
+    /// and moderation standing: build chat screens from this.
+    /// </summary>
+    public sealed class ChatClientConfig
+    {
+        /// <summary>Per conversation kind (<c>direct</c>, <c>group</c>, <c>guild</c>, <c>channel</c>…).</summary>
+        [JsonProperty("kinds")] public Dictionary<string, ChatKindConfig> Kinds { get; set; } = new();
+        /// <summary>The public channels (empty when channels are off).</summary>
+        [JsonProperty("channels")] public List<ChatChannel> Channels { get; set; } = new();
+        [JsonProperty("messages")] public ChatMessageRules Messages { get; set; } = new();
+        [JsonProperty("rateLimit")] public ChatRateLimit RateLimit { get; set; } = new();
+        [JsonProperty("preferences")] public ChatPreferences Preferences { get; set; } = new();
+        [JsonProperty("status")] public ModerationStatus Status { get; set; } = new();
+    }
+
+    public sealed class ChatLeaveResult
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        [JsonProperty("left")] public bool Left { get; set; }
+    }
+
+    public sealed class ChatMemberRemoved
+    {
+        [JsonProperty("conversationId")] public string ConversationId { get; set; } = string.Empty;
+        /// <summary>The removed player's external id.</summary>
+        [JsonProperty("removed")] public string Removed { get; set; } = string.Empty;
+    }
+
+    public sealed class ChatMessageDeleted
+    {
+        [JsonProperty("messageId")] public string MessageId { get; set; } = string.Empty;
+        [JsonProperty("deleted")] public bool Deleted { get; set; }
+    }
+
+    public sealed class ChatReadResult
+    {
+        /// <summary>The read marker now stored (never moves backwards, capped at the conversation's last seq).</summary>
+        [JsonProperty("lastReadSeq")] public long LastReadSeq { get; set; }
+    }
+
+    internal sealed class ChatChannelsPayload
+    {
+        [JsonProperty("channels")] public List<ChatConversation> Channels { get; set; } = new();
+    }
+
+    // ── Moderation (docs/26) ──────────────────────────────────────────
+
+    /// <summary>Report categories for <c>Moderation.ReportAsync</c>.</summary>
+    public static class ReportCategory
+    {
+        public const string Spam = "spam";
+        public const string Harassment = "harassment";
+        public const string HateSpeech = "hate_speech";
+        public const string SexualContent = "sexual_content";
+        public const string Violence = "violence";
+        public const string SelfHarm = "self_harm";
+        public const string Cheating = "cheating";
+        public const string Impersonation = "impersonation";
+        public const string InappropriateName = "inappropriate_name";
+        public const string Other = "other";
+    }
+
+    /// <summary>Where the reported behaviour happened.</summary>
+    public static class ReportContext
+    {
+        public const string Chat = "chat";
+        public const string Profile = "profile";
+        public const string Guild = "guild";
+        public const string Gameplay = "gameplay";
+        public const string Other = "other";
+    }
+
+    /// <summary>A warning, chat mute or chat ban on the player.</summary>
+    public sealed class Restriction
+    {
+        [JsonProperty("restrictionId")] public string RestrictionId { get; set; } = string.Empty;
+        /// <summary><c>warning</c>, <c>chat_mute</c> or <c>chat_ban</c>.</summary>
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+        /// <summary>Shown to the player.</summary>
+        [JsonProperty("reason")] public string? Reason { get; set; }
+        /// <summary><c>moderator</c>, <c>auto</c> or <c>server</c>.</summary>
+        [JsonProperty("source")] public string Source { get; set; } = string.Empty;
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        /// <summary>null = no expiry (a warning until acknowledged, an indefinite chat ban).</summary>
+        [JsonProperty("expiresAt")] public string? ExpiresAt { get; set; }
+        [JsonProperty("liftedAt")] public string? LiftedAt { get; set; }
+        [JsonProperty("acknowledgedAt")] public string? AcknowledgedAt { get; set; }
+        [JsonProperty("active")] public bool Active { get; set; }
+        [JsonProperty("reportId")] public string? ReportId { get; set; }
+    }
+
+    /// <summary>The player's standing: can they read and post in chat, and why not.</summary>
+    public sealed class ModerationStatus
+    {
+        /// <summary>False while chat-banned (no reading or posting).</summary>
+        [JsonProperty("canChat")] public bool CanChat { get; set; } = true;
+        /// <summary>False while chat-banned or muted.</summary>
+        [JsonProperty("canPost")] public bool CanPost { get; set; } = true;
+        [JsonProperty("mutedUntil")] public string? MutedUntil { get; set; }
+        [JsonProperty("chatBannedUntil")] public string? ChatBannedUntil { get; set; }
+        /// <summary>In force now; warnings stay until acknowledged.</summary>
+        [JsonProperty("restrictions")] public List<Restriction> Restrictions { get; set; } = new();
+    }
+
+    /// <summary>A report this player filed. The reviewer's decision stays private.</summary>
+    public sealed class MyReport
+    {
+        [JsonProperty("reportId")] public string ReportId { get; set; } = string.Empty;
+        [JsonProperty("targetExternalPlayerId")] public string TargetExternalPlayerId { get; set; } = string.Empty;
+        [JsonProperty("category")] public string Category { get; set; } = string.Empty;
+        [JsonProperty("context")] public string Context { get; set; } = string.Empty;
+        /// <summary><c>open</c>, <c>resolved</c> or <c>dismissed</c>.</summary>
+        [JsonProperty("status")] public string Status { get; set; } = "open";
+        [JsonProperty("createdAt")] public string CreatedAt { get; set; } = string.Empty;
+        [JsonProperty("updatedAt")] public string UpdatedAt { get; set; } = string.Empty;
+        [JsonProperty("resolvedAt")] public string? ResolvedAt { get; set; }
+    }
+
+    /// <summary>Input for <c>Moderation.ReportAsync</c>; null fields are omitted.</summary>
+    public sealed class ReportPlayerInput
+    {
+        [JsonProperty("targetExternalPlayerId")] public string TargetExternalPlayerId { get; set; } = string.Empty;
+        /// <summary>One of the <see cref="ReportCategory"/> values.</summary>
+        [JsonProperty("category")] public string Category { get; set; } = ReportCategory.Other;
+        /// <summary>One of the <see cref="ReportContext"/> values; omitted = <c>other</c>.</summary>
+        [JsonProperty("context", NullValueHandling = NullValueHandling.Ignore)] public string? Context { get; set; }
+        /// <summary>The player's own words (up to the server's limit).</summary>
+        [JsonProperty("comment", NullValueHandling = NullValueHandling.Ignore)] public string? Comment { get; set; }
+        /// <summary>The conversation the offending messages are in.</summary>
+        [JsonProperty("conversationId", NullValueHandling = NullValueHandling.Ignore)] public string? ConversationId { get; set; }
+        /// <summary>The offending messages, attached as evidence.</summary>
+        [JsonProperty("messageIds", NullValueHandling = NullValueHandling.Ignore)] public List<string>? MessageIds { get; set; }
+        [JsonProperty("guildId", NullValueHandling = NullValueHandling.Ignore)] public string? GuildId { get; set; }
+    }
+
+    internal sealed class MyReportsPayload
+    {
+        [JsonProperty("reports")] public List<MyReport> Reports { get; set; } = new();
     }
 
     /// <summary>

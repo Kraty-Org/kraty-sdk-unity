@@ -4,6 +4,21 @@ All notable changes to `app.kraty.sdk` (Kraty Unity SDK) live here.
 Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 [SemVer](https://semver.org/).
 
+## Unreleased
+
+### Features
+
+* **chat:** `kraty.Chat` (config, preferences, inbox, unread, direct / group / guild / channel conversations, members and roles, messages with auto `clientMessageId`, custom cards, read markers, typing, mute / hide) and the `ChatStream` SSE live stream with typed callbacks; `KratyClientOptions.ChatProfanityFilter` sends `X-Kraty-Chat-Filter`. `kraty.Moderation`: `ReportAsync`, `ReportsAsync`, `StatusAsync`, `AcknowledgeWarningAsync`.
+* **chat:** message editing. `Chat.EditMessageAsync` (own messages, within the game's edit window), `ChatMessage.EditedAt`, `ChatMessageRules.EditWindowSeconds`, and `ChatStream.OnMessageEdited` / `ChatStreamEventKind.MessageEdited` for the `message_edited` stream event.
+* **teams:** co-op team events (additive). `EventListing.Teams` / `TeamFormation` / `TeamOptions`, `Teams` on `StartAttemptResponse`, `ProgressResult` and `FinishAttemptResult`, `ProgressInput.EventTeamId`, team boards (`EventLeaderboard.ParticipantScope`, `LeaderboardEntry.Team`), and `Events.TeamMembersAsync`, `MatchTeamAsync`, `InvitePartnerAsync`, `PartnerInvitesAsync`, `AcceptInviteAsync`, `DeclineInviteAsync`, `CancelInviteAsync`, `RandomPartnerAsync`, `PartnerSuggestionsAsync`, matching the TypeScript client.
+
+## [0.29.2](https://github.com/Kraty-Org/Kraty/compare/sdk-client-unity-v0.29.1...sdk-client-unity-v0.29.2) (2026-10-16)
+
+
+### Documentation
+
+* **sdks:** bump install snippets — clients v0.29.1, server-ts v0.18.2, server-py v0.17.2 ([#89](https://github.com/Kraty-Org/Kraty/issues/89)) ([3942f3b](https://github.com/Kraty-Org/Kraty/commit/3942f3b0618fd1fd12c5c9bb5d1508f77f136365))
+
 ## [0.29.1](https://github.com/Kraty-Org/Kraty/compare/sdk-client-unity-v0.29.0...sdk-client-unity-v0.29.1) (2026-09-14)
 
 

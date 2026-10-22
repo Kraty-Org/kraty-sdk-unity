@@ -12,7 +12,7 @@ namespace Kraty
 {
     /// <summary>
     /// Server-Sent Events plumbing shared by every Kraty stream
-    /// (leaderboards, inventory): opening the long-lived request, mapping a
+    /// (leaderboards, inventory, chat): opening the long-lived request, mapping a
     /// non-2xx response onto the SDK's error types, and parsing the
     /// <c>event:</c> / <c>data:</c> line protocol.
     ///
@@ -24,6 +24,12 @@ namespace Kraty
     /// </summary>
     internal static class SseReader
     {
+        private static JToken ParseKeepingDates(string raw)
+        {
+            using var reader = new JsonTextReader(new StringReader(raw)) { DateParseHandling = DateParseHandling.None };
+            return JToken.ReadFrom(reader);
+        }
+
         /// <summary>
         /// Opens the stream and returns the live response. Throws
         /// <see cref="KratyNetworkError"/> when the connection fails and
@@ -37,7 +43,8 @@ namespace Kraty
             string authHeader,
             string? playerSecret,
             string label,
-            CancellationToken cancellationToken
+            CancellationToken cancellationToken,
+            IReadOnlyDictionary<string, string>? extraHeaders = null
         )
         {
             var req = new HttpRequestMessage(HttpMethod.Get, url);
@@ -46,6 +53,10 @@ namespace Kraty
             if (!string.IsNullOrEmpty(playerSecret))
             {
                 req.Headers.TryAddWithoutValidation("x-player-secret", playerSecret);
+            }
+            if (extraHeaders != null)
+            {
+                foreach (var h in extraHeaders) req.Headers.TryAddWithoutValidation(h.Key, h.Value);
             }
 
             HttpResponseMessage response;
@@ -97,12 +108,16 @@ namespace Kraty
         /// <paramref name="onEvent"/> once per complete SSE event.
         /// Parse failures and read failures go to <paramref name="onError"/>;
         /// a cancellation is never reported as an error.
+        /// <paramref name="rawDates"/> keeps ISO timestamps as JSON strings
+        /// (instead of Json.NET's default date tokens) so typed DTOs with
+        /// <c>string</c> timestamp fields read them back verbatim.
         /// </summary>
         public static async Task PumpAsync(
             HttpResponseMessage response,
             CancellationTokenSource cts,
             Action<string, Dictionary<string, JToken>> onEvent,
-            Action<Exception> onError
+            Action<Exception> onError,
+            bool rawDates = false
         )
         {
             try
@@ -122,7 +137,7 @@ namespace Kraty
                     var raw = dataBuffer.ToString();
                     try
                     {
-                        var root = JToken.Parse(raw);
+                        var root = rawDates ? ParseKeepingDates(raw) : JToken.Parse(raw);
                         var dict = new Dictionary<string, JToken>();
                         if (root is JObject obj)
                         {

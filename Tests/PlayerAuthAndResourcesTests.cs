@@ -289,6 +289,33 @@ namespace Kraty.Tests
             Assert.Equal(150, wallet[0].Balance);
         }
 
+        // ── DailyLoginClient ─────────────────────────────────────────
+
+        [Fact]
+        public async Task DailyLoginReadUnwrapsCalendar()
+        {
+            var handler = new FakeHandler().Push(200,
+                "{\"data\":{\"days\":[{\"day\":1,\"entries\":[{\"type\":\"currency\",\"currencyKey\":\"gems\",\"amount\":10}]}]," +
+                "\"afterLastDay\":\"restart\",\"itemKey\":\"login_calendar\",\"loginStreak\":1,\"currentDay\":1," +
+                "\"paidToday\":true,\"todayGrantId\":\"g-1\",\"nextDayAt\":\"2030-01-08T00:00:00.000Z\"}}");
+            using var kraty = new Kraty(BaseOpts(handler, "ps"));
+            var cal = await kraty.DailyLogin.ReadAsync(@as: "alice");
+            Assert.NotNull(cal);
+            Assert.Equal(1, cal!.CurrentDay);
+            Assert.True(cal.PaidToday);
+            Assert.Equal("g-1", cal.TodayGrantId);
+            Assert.Equal("gems", cal.Days[0].Entries[0]["currencyKey"]!.ToString());
+            Assert.EndsWith("/sdk/v1/players/alice/daily-login", handler.Calls[0].Url);
+        }
+
+        [Fact]
+        public async Task DailyLoginReadReturnsNullWithoutCalendar()
+        {
+            var handler = new FakeHandler().Push(200, "{\"data\":null}");
+            using var kraty = new Kraty(BaseOpts(handler, "ps"));
+            Assert.Null(await kraty.DailyLogin.ReadAsync(@as: "alice"));
+        }
+
         [Fact]
         public async Task WalletDebitPassesAmountAndAutoStampsKey()
         {
@@ -395,6 +422,50 @@ namespace Kraty.Tests
             Assert.Single(events[0].EntryCost!.Currencies);
             Assert.Equal("gold", events[0].EntryCost!.Currencies[0].Key);
             Assert.Equal(50, events[0].EntryCost!.Currencies[0].Amount);
+        }
+
+        [Fact]
+        public async Task EventListingDecodesRuleFields()
+        {
+            var handler = new FakeHandler().Push(200,
+                "{\"data\":[" +
+                "{\"eventKey\":\"race\",\"windowId\":\"w1\",\"startsAt\":\"2026-01-01\",\"endsAt\":\"2026-01-02\"," +
+                "\"goal\":10,\"unlockCondition\":{\"type\":\"level_at_least\",\"level\":4}," +
+                "\"attemptDurationSeconds\":300}," +
+                "{\"eventKey\":\"old_backend\",\"windowId\":\"w2\",\"startsAt\":\"2026-01-01\",\"endsAt\":\"2026-01-02\"}" +
+                "]}");
+            using var kraty = new Kraty(BaseOpts(handler));
+            var events = await kraty.Events.ListForPlayerAsync(@as: "alice");
+            Assert.Equal(10, events[0].Goal);
+            Assert.Equal("level_at_least", (string?)events[0].UnlockCondition!["type"]);
+            Assert.Equal(4, (int)events[0].UnlockCondition!["level"]);
+            Assert.Equal(300, events[0].AttemptDurationSeconds);
+            Assert.Null(events[1].Goal);
+            Assert.Null(events[1].UnlockCondition);
+            Assert.Null(events[1].AttemptDurationSeconds);
+        }
+
+        // ── Leaderboards.ListAsync ───────────────────────────────────
+
+        [Fact]
+        public async Task LeaderboardsListGetsAndUnwrapsSummaries()
+        {
+            var handler = new FakeHandler().Push(200,
+                "{\"data\":[{\"key\":\"weekly_band\",\"name\":\"Weekly\",\"description\":null," +
+                "\"resetCadence\":\"weekly\",\"nextResetAt\":\"2026-10-05T00:00:00.000Z\"," +
+                "\"acceptClientScores\":false,\"contextSegments\":[\"level_band\"]}]}");
+            using var kraty = new Kraty(BaseOpts(handler));
+            var boards = await kraty.Leaderboards.ListAsync();
+            Assert.Equal("GET", handler.Calls[0].Method);
+            Assert.Equal($"{BaseUrl}/sdk/v1/leaderboards", handler.Calls[0].Url);
+            var b = Assert.Single(boards);
+            Assert.Equal("weekly_band", b.Key);
+            Assert.Equal("Weekly", (string?)b.Name);
+            Assert.Null(b.Description);
+            Assert.Equal("weekly", b.ResetCadence);
+            Assert.Equal("2026-10-05T00:00:00.000Z", b.NextResetAt);
+            Assert.False(b.AcceptClientScores);
+            Assert.Equal(new List<string> { "level_band" }, b.ContextSegments);
         }
 
         [Fact]
@@ -574,5 +645,45 @@ namespace Kraty.Tests
             // No HTTP fired; the store already had everything.
             Assert.Empty(handler.Calls);
         }
-    }
+    
+        // ── Co-op team events ────────────────────────────────────────
+
+        [Fact]
+        public async Task ListingCarriesTeamSeatsAndFormation()
+        {
+            var handler = new FakeHandler().Push(200,
+                "{\"data\":[{\"eventKey\":\"chest\",\"windowId\":\"w\",\"startsAt\":\"\",\"endsAt\":\"\",\"teamFormation\":\"external\",\"teamOptions\":{\"maxMembers\":50,\"teamSize\":null,\"maxPartners\":null,\"allowRandom\":null,\"contextKeys\":[]}," +
+                "\"teams\":[{\"eventTeamId\":\"t1\",\"teamKey\":\"red\",\"displayName\":\"Red\",\"formation\":\"external\",\"status\":\"active\",\"score\":120,\"memberCount\":3," +
+                "\"goal\":{\"target\":300,\"remaining\":180,\"completed\":false},\"milestones\":[{\"key\":\"step1\",\"threshold\":100,\"unlocked\":true,\"paid\":true,\"pendingMinContribution\":false}]," +
+                "\"seat\":{\"seatId\":\"s1\",\"status\":\"active\",\"contribution\":120,\"rank\":1,\"locked\":true},\"leaderboardId\":null,\"boardRank\":null,\"rollup\":null}]}]}");
+            using var kraty = new Kraty(BaseOpts(handler));
+            var events = await kraty.Events.ListForPlayerAsync(@as: "alice");
+            Assert.Equal("external", events[0].TeamFormation);
+            Assert.Equal(50, events[0].TeamOptions!.MaxMembers);
+            Assert.Null(events[0].TeamOptions!.AllowRandom);
+            var team = events[0].Teams![0];
+            Assert.Equal(180, team.Goal!.Remaining);
+            Assert.True(team.Milestones[0].Paid);
+            Assert.Equal(1, team.Seat.Rank);
+        }
+
+        [Fact]
+        public async Task TeamCallsHitTheTeamRoutes()
+        {
+            var handler = new FakeHandler()
+                .Push(200, "{\"data\":{\"windowId\":\"w\",\"eventTeamId\":\"t1\",\"created\":true,\"teams\":[]}}")
+                .Push(201, "{\"data\":{\"eventTeamId\":\"p1\",\"status\":\"pending\",\"from\":{\"externalPlayerId\":\"alice\"},\"to\":{\"externalPlayerId\":\"bob\"},\"createdAt\":\"\"}}")
+                .Push(200, "{\"data\":{\"eventTeamId\":\"t1\",\"teamKey\":\"m:1\",\"memberCount\":1,\"members\":[{\"externalPlayerId\":\"alice\",\"contribution\":5,\"rank\":1,\"status\":\"active\",\"isSelf\":true}],\"nextCursor\":null}}");
+            using var kraty = new Kraty(BaseOpts(handler));
+            var match = await kraty.Events.MatchTeamAsync("race", @as: "alice");
+            Assert.True(match.Created);
+            Assert.EndsWith("/sdk/v1/players/alice/events/race/teams/match", handler.Calls[0].Url);
+            var invite = await kraty.Events.InvitePartnerAsync("pairs", externalPlayerId: "bob", @as: "alice");
+            Assert.Equal("pending", invite.Status);
+            Assert.Contains("\"externalPlayerId\":\"bob\"", handler.Calls[1].Body);
+            var page = await kraty.Events.TeamMembersAsync("t1", limit: 10, @as: "alice");
+            Assert.True(page.Members[0].IsSelf);
+            Assert.EndsWith("/sdk/v1/players/alice/event-teams/t1/members?limit=10", handler.Calls[2].Url);
+        }
+}
 }

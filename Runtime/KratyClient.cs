@@ -88,6 +88,18 @@ namespace Kraty
         /// </summary>
         public string? AppVersion { get; set; }
 
+        /// <summary>
+        /// The game's profanity-filter choice for its player's chat. Kraty
+        /// resolves every message's text per viewer; when this is set, every
+        /// <c>kraty.Chat</c> request and the chat stream send
+        /// <c>X-Kraty-Chat-Filter: on</c> (<c>true</c>) or <c>off</c>
+        /// (<c>false</c>), which wins over the player's saved preference.
+        /// Leave null (the default) to send nothing: the player's saved
+        /// preference applies, then each conversation kind's default. A kind
+        /// configured as <c>always</c> filters regardless.
+        /// </summary>
+        public bool? ChatProfanityFilter { get; set; }
+
         /// <summary>Override only for testing / staging. Production clients always hit the default.</summary>
         public string BaseUrl { get; set; } = "https://api.kraty.io";
 
@@ -129,6 +141,7 @@ namespace Kraty
                 ActiveExternalPlayerId = ActiveExternalPlayerId,
                 SecretStore = SecretStore,
                 MembershipStore = MembershipStore,
+                ChatProfanityFilter = ChatProfanityFilter,
                 BaseUrl = BaseUrl,
                 Timeout = Timeout,
                 Retry = Retry,
@@ -151,6 +164,7 @@ namespace Kraty
                 ActiveExternalPlayerId = id,
                 SecretStore = SecretStore,
                 MembershipStore = MembershipStore,
+                ChatProfanityFilter = ChatProfanityFilter,
                 BaseUrl = BaseUrl,
                 Timeout = Timeout,
                 Retry = Retry,
@@ -239,6 +253,8 @@ namespace Kraty
         // Device telemetry headers (see KratyClientOptions.Platform / AppVersion).
         private readonly string? _platform;
         private readonly string? _appVersion;
+        // `on` / `off` for X-Kraty-Chat-Filter (see KratyClientOptions.ChatProfanityFilter); null = not sent.
+        private readonly string? _chatFilter;
         // Identity is mutable on purpose: the lazy EnsureIdentityAsync()
         // call may register or restore a player after construction and
         // mutate these in place so subsequent calls skip the round-trip.
@@ -268,6 +284,7 @@ namespace Kraty
             _authHeader = $"Bearer {opts.ApiKey}";
             _platform = NormalizePlatform(opts.Platform) ?? DetectPlatform();
             _appVersion = string.IsNullOrWhiteSpace(opts.AppVersion) ? DetectAppVersion() : opts.AppVersion!.Trim();
+            _chatFilter = opts.ChatProfanityFilter switch { true => "on", false => "off", null => null };
             _playerSecret = string.IsNullOrEmpty(opts.PlayerSecret) ? null : opts.PlayerSecret;
             _activeExternalPlayerId = string.IsNullOrEmpty(opts.ActiveExternalPlayerId)
                 ? null
@@ -391,6 +408,8 @@ namespace Kraty
         internal HttpClient HttpForStreaming => _http;
         internal JsonSerializerSettings JsonSerializerSettings => JsonOptions;
         internal ISecretStore SecretStore => _secretStore;
+        /// <summary><c>on</c> / <c>off</c> when the game set a chat filter choice, else null.</summary>
+        internal string? ChatFilterValue => _chatFilter;
 
         /// <summary>
         /// The active player this client is authenticated as. Resource
@@ -533,11 +552,24 @@ namespace Kraty
         /// <summary>
         /// Low-level: fire a JSON request. Resource clients call this.
         /// </summary>
-        public async Task<T> RequestAsync<T>(
+        public Task<T> RequestAsync<T>(
             HttpMethod method,
             string path,
             object? body = null,
             CancellationToken cancellationToken = default
+        ) where T : class
+            => RequestWithHeadersAsync<T>(method, path, body, null, cancellationToken);
+
+        /// <summary>
+        /// <see cref="RequestAsync{T}"/> plus extra request headers (e.g. the
+        /// chat filter choice).
+        /// </summary>
+        internal async Task<T> RequestWithHeadersAsync<T>(
+            HttpMethod method,
+            string path,
+            object? body,
+            IReadOnlyDictionary<string, string>? headers,
+            CancellationToken cancellationToken
         ) where T : class
         {
             var url = path.StartsWith("/", StringComparison.Ordinal) ? path : "/" + path;
@@ -550,7 +582,7 @@ namespace Kraty
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
-                    using var res = await FireOnceAsync(method, url, requestBody, cancellationToken).ConfigureAwait(false);
+                    using var res = await FireOnceAsync(method, url, requestBody, headers, cancellationToken).ConfigureAwait(false);
                     sw.Stop();
 
                     _onRequest?.Invoke(new RequestInfo
@@ -623,6 +655,7 @@ namespace Kraty
             HttpMethod method,
             string url,
             object? body,
+            IReadOnlyDictionary<string, string>? headers,
             CancellationToken cancellationToken
         )
         {
@@ -642,6 +675,10 @@ namespace Kraty
             if (!string.IsNullOrEmpty(secret))
             {
                 req.Headers.TryAddWithoutValidation("x-player-secret", secret);
+            }
+            if (headers != null)
+            {
+                foreach (var h in headers) req.Headers.TryAddWithoutValidation(h.Key, h.Value);
             }
             if (body != null)
             {

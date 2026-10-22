@@ -37,6 +37,10 @@ namespace Kraty
         public PurchasesClient Purchases { get; }
         public FriendsClient Friends { get; }
         public CatalogClient Catalog { get; }
+        public DailyLoginClient DailyLogin { get; }
+        public GuildsClient Guilds { get; }
+        public ChatClient Chat { get; }
+        public ModerationClient Moderation { get; }
 
         public Kraty(KratyClientOptions opts)
         {
@@ -52,6 +56,10 @@ namespace Kraty
             Purchases = new PurchasesClient(Client);
             Friends = new FriendsClient(Client);
             Catalog = new CatalogClient(Client);
+            DailyLogin = new DailyLoginClient(Client);
+            Guilds = new GuildsClient(Client);
+            Chat = new ChatClient(Client);
+            Moderation = new ModerationClient(Client);
         }
 
         public void Dispose() => Client.Dispose();

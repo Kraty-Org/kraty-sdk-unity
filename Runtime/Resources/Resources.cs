@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace Kraty
 {
@@ -126,6 +130,137 @@ namespace Kraty
             ).ConfigureAwait(false);
             return env.Data ?? new FinishAttemptResult();
         }
+
+        // ── Co-op team events (docs/24) ───────────────────────────────
+
+        private static string EventPath(string externalPlayerId, string eventKey, string rest) =>
+            $"/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}/events/{Uri.EscapeDataString(eventKey)}{rest}";
+
+        /// <summary>
+        /// GET <c>/sdk/v1/players/:p/event-teams/:id/members</c>: your team's
+        /// members by contribution, with <c>IsSelf</c> on your row. Only a
+        /// member may read it. Page with <paramref name="cursor"/>.
+        /// </summary>
+        public async Task<EventTeamMembersPage> TeamMembersAsync(
+            string eventTeamId,
+            string? cursor = null,
+            int? limit = null,
+            string? @as = null,
+            CancellationToken ct = default
+        )
+        {
+            var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            var qs = new List<string>();
+            if (!string.IsNullOrEmpty(cursor)) qs.Add($"cursor={Uri.EscapeDataString(cursor!)}");
+            if (limit.HasValue) qs.Add($"limit={limit.Value}");
+            var suffix = qs.Count > 0 ? "?" + string.Join("&", qs) : string.Empty;
+            var env = await _client.RequestAsync<DataEnvelope<EventTeamMembersPage>>(
+                HttpMethod.Get,
+                $"/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}/event-teams/{Uri.EscapeDataString(eventTeamId)}/members{suffix}",
+                cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new EventTeamMembersPage();
+        }
+
+        /// <summary>POST <c>…/events/:e/teams/match</c>: your auto-matched team (<c>auto_match</c> events). Idempotent.</summary>
+        public async Task<TeamMatchResult> MatchTeamAsync(string eventKey, string? @as = null, CancellationToken ct = default)
+        {
+            var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            var env = await _client.RequestAsync<DataEnvelope<TeamMatchResult>>(
+                HttpMethod.Post, EventPath(externalPlayerId, eventKey, "/teams/match"), body: new { }, cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new TeamMatchResult();
+        }
+
+        /// <summary>
+        /// POST <c>…/partners/invites</c>: invite a partner by external id (or
+        /// pass <paramref name="friendCode"/> instead). Their pending invite to you
+        /// is accepted instead (<c>Status = accepted</c>).
+        /// </summary>
+        public async Task<PartnerInvite> InvitePartnerAsync(
+            string eventKey,
+            string? externalPlayerId = null,
+            string? friendCode = null,
+            string? @as = null,
+            CancellationToken ct = default
+        )
+        {
+            if ((externalPlayerId == null) == (friendCode == null))
+                throw new ArgumentException("pass exactly one of externalPlayerId or friendCode");
+            var me = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            object body = externalPlayerId != null ? new { externalPlayerId } : new { friendCode };
+            var env = await _client.RequestAsync<DataEnvelope<PartnerInvite>>(
+                HttpMethod.Post, EventPath(me, eventKey, "/partners/invites"), body: body, cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new PartnerInvite();
+        }
+
+        /// <summary>GET <c>…/partners/invites</c>: pending invites to you (<c>in</c>, default) or from you (<c>out</c>).</summary>
+        public async Task<List<PartnerInvite>> PartnerInvitesAsync(
+            string eventKey,
+            string direction = "in",
+            string? @as = null,
+            CancellationToken ct = default
+        )
+        {
+            var me = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            var env = await _client.RequestAsync<DataEnvelope<List<PartnerInvite>>>(
+                HttpMethod.Get,
+                EventPath(me, eventKey, $"/partners/invites?direction={Uri.EscapeDataString(direction)}"),
+                cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new List<PartnerInvite>();
+        }
+
+        /// <summary>Accept an invite sent to you: the pair's bar goes live.</summary>
+        public Task<PartnerInvite> AcceptInviteAsync(string eventKey, string eventTeamId, string? @as = null, CancellationToken ct = default) =>
+            AnswerInviteAsync(eventKey, eventTeamId, "accept", @as, ct);
+
+        /// <summary>Decline an invite sent to you (both slots free up).</summary>
+        public Task<PartnerInvite> DeclineInviteAsync(string eventKey, string eventTeamId, string? @as = null, CancellationToken ct = default) =>
+            AnswerInviteAsync(eventKey, eventTeamId, "decline", @as, ct);
+
+        /// <summary>Withdraw an invite you sent (both slots free up).</summary>
+        public Task<PartnerInvite> CancelInviteAsync(string eventKey, string eventTeamId, string? @as = null, CancellationToken ct = default) =>
+            AnswerInviteAsync(eventKey, eventTeamId, "cancel", @as, ct);
+
+        private async Task<PartnerInvite> AnswerInviteAsync(string eventKey, string eventTeamId, string action, string? @as, CancellationToken ct)
+        {
+            var me = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            var env = await _client.RequestAsync<DataEnvelope<PartnerInvite>>(
+                HttpMethod.Post,
+                EventPath(me, eventKey, $"/partners/invites/{Uri.EscapeDataString(eventTeamId)}/{action}"),
+                body: new { },
+                cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new PartnerInvite();
+        }
+
+        /// <summary>POST <c>…/partners/random</c>: pair with someone waiting, or open a bar that waits (solo after the event's fallback).</summary>
+        public async Task<RandomPartnerResult> RandomPartnerAsync(string eventKey, string? @as = null, CancellationToken ct = default)
+        {
+            var me = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            var env = await _client.RequestAsync<DataEnvelope<RandomPartnerResult>>(
+                HttpMethod.Post, EventPath(me, eventKey, "/partners/random"), body: new { }, cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new RandomPartnerResult();
+        }
+
+        /// <summary>GET <c>…/partners/suggestions</c>: friends first, then recently active players with a free slot.</summary>
+        public async Task<List<PartnerSuggestion>> PartnerSuggestionsAsync(
+            string eventKey,
+            int? limit = null,
+            string? @as = null,
+            CancellationToken ct = default
+        )
+        {
+            var me = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            var qs = limit.HasValue ? $"?limit={limit.Value}" : string.Empty;
+            var env = await _client.RequestAsync<DataEnvelope<List<PartnerSuggestion>>>(
+                HttpMethod.Get, EventPath(me, eventKey, $"/partners/suggestions{qs}"), cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new List<PartnerSuggestion>();
+        }
     }
 
     /// <summary>
@@ -139,6 +274,20 @@ namespace Kraty
     {
         private readonly KratyClient _client;
         public LeaderboardsClient(KratyClient client) => _client = client;
+
+        /// <summary>
+        /// GET <c>/sdk/v1/leaderboards</c>: the game's dashboard-configured
+        /// boards (archived ones left out), so the client can discover keys
+        /// instead of hard-coding them.
+        /// </summary>
+        /// <param name="ct">Cancellation.</param>
+        public async Task<List<LeaderboardSummary>> ListAsync(CancellationToken ct = default)
+        {
+            var env = await _client.RequestAsync<DataEnvelope<List<LeaderboardSummary>>>(
+                HttpMethod.Get, "/sdk/v1/leaderboards", cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new List<LeaderboardSummary>();
+        }
 
         /// <summary>
         /// GET <c>/sdk/v1/leaderboards/:key</c>: snapshot read of a
@@ -1811,6 +1960,768 @@ namespace Kraty
                 cancellationToken: ct
             ).ConfigureAwait(false);
             return env.Data ?? new Catalog();
+        }
+    }
+
+    /// <summary>
+    /// Resource client for <c>/sdk/v1/players/:p/daily-login</c>: the
+    /// game's daily login calendar. Read-only; the server pays each day's
+    /// reward on the player's first session of that UTC day (a call on
+    /// first contact or after 30 minutes of silence opens one), as a grant
+    /// with <c>SourceKind == "daily_login"</c>.
+    /// </summary>
+    public sealed class DailyLoginClient
+    {
+        private readonly KratyClient _client;
+        public DailyLoginClient(KratyClient client) => _client = client;
+
+        /// <summary>
+        /// GET <c>/sdk/v1/players/:p/daily-login</c>. Returns <c>null</c>
+        /// when the game has no calendar or it is switched off for this
+        /// key's environment. When this request is the one that opens a
+        /// session, today is already paid in the result; a player still in a
+        /// session from before midnight UTC is paid on their next one.
+        /// </summary>
+        public async Task<DailyLogin?> ReadAsync(
+            string? @as = null,
+            CancellationToken ct = default)
+        {
+            var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            var env = await _client.RequestAsync<DataEnvelope<DailyLogin>>(
+                HttpMethod.Get,
+                $"/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}/daily-login",
+                cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data;
+        }
+    }
+
+    /// <summary>
+    /// Resource client for guilds (docs/25): <c>/sdk/v1/players/:p/guild*</c>
+    /// and <c>/guilds*</c>. One guild per player, up to 50 members, leader /
+    /// co-leader / member roles. Every call acts as the active player (or
+    /// <c>@as</c>). Build screens from <see cref="ConfigAsync"/>: it carries
+    /// the unlock gate, cost, role permissions, help and score settings.
+    /// </summary>
+    public sealed class GuildsClient
+    {
+        private readonly KratyClient _client;
+        public GuildsClient(KratyClient client) => _client = client;
+
+        private async Task<string> BaseAsync(string? @as, CancellationToken ct)
+        {
+            var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            return $"/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}";
+        }
+
+        private async Task<T?> SendAsync<T>(HttpMethod method, string path, object? body, CancellationToken ct)
+        {
+            var env = await _client.RequestAsync<DataEnvelope<T>>(method, path, body: body, cancellationToken: ct)
+                .ConfigureAwait(false);
+            return env.Data;
+        }
+
+        private static string Query(params (string Key, string? Value)[] pairs)
+        {
+            var parts = new List<string>();
+            foreach (var (key, value) in pairs)
+            {
+                if (string.IsNullOrEmpty(value)) continue;
+                parts.Add($"{key}={Uri.EscapeDataString(value)}");
+            }
+            return parts.Count == 0 ? string.Empty : "?" + string.Join("&", parts);
+        }
+
+        /// <summary>GET <c>/guilds/config</c>: the game's guild rules for this player.</summary>
+        public async Task<GuildClientConfig> ConfigAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await SendAsync<GuildClientConfig>(HttpMethod.Get, $"{b}/guilds/config", null, ct).ConfigureAwait(false)
+                ?? new GuildClientConfig();
+        }
+
+        /// <summary>GET <c>/guild</c>: your guild, role, permissions and week; null when guildless.</summary>
+        public async Task<MyGuild?> MineAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await SendAsync<MyGuild>(HttpMethod.Get, $"{b}/guild", null, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>GET <c>/guilds/:guildId</c>: any guild of this game with its roster.</summary>
+        public async Task<GuildDetail> GetAsync(string guildId, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await SendAsync<GuildDetail>(HttpMethod.Get, $"{b}/guilds/{Uri.EscapeDataString(guildId)}", null, ct)
+                .ConfigureAwait(false) ?? new GuildDetail();
+        }
+
+        /// <summary>GET <c>/guilds?q=</c>: name search, prefix matches first (one page; see <c>SearchPageAsync</c>).</summary>
+        public async Task<List<GuildSummary>> SearchAsync(
+            string query, string? country = null, int? limit = null, string? @as = null, CancellationToken ct = default)
+        {
+            var page = await SearchPageAsync(query, country, limit, null, @as, ct).ConfigureAwait(false);
+            return page.Guilds;
+        }
+
+        /// <summary>
+        /// GET <c>/guilds?q=&amp;offset=</c>: one page of name search (<c>limit</c> default 20, max 50)
+        /// and the <c>NextOffset</c> for the next page (null at the end).
+        /// </summary>
+        public async Task<GuildSearchPage> SearchPageAsync(
+            string query, string? country = null, int? limit = null, int? offset = null,
+            string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var qs = Query(("q", query), ("country", country), ("limit", limit?.ToString()),
+                ("offset", offset is > 0 ? offset.ToString() : null));
+            var data = await SendAsync<GuildSearchPage>(HttpMethod.Get, $"{b}/guilds{qs}", null, ct)
+                .ConfigureAwait(false);
+            return data ?? new GuildSearchPage();
+        }
+
+        /// <summary>GET <c>/guilds/recommended</c>: guilds with room, friends' guilds first.</summary>
+        public async Task<List<RecommendedGuild>> RecommendedAsync(
+            string? country = null, int? limit = null, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var qs = Query(("country", country), ("limit", limit?.ToString()));
+            var data = await SendAsync<GuildListPayload<RecommendedGuild>>(HttpMethod.Get, $"{b}/guilds/recommended{qs}", null, ct)
+                .ConfigureAwait(false);
+            return data?.Guilds ?? new List<RecommendedGuild>();
+        }
+
+        /// <summary>POST <c>/guilds</c>: found a guild (gate checked, cost charged atomically).</summary>
+        public async Task<MyGuild> CreateAsync(GuildProfileInput input, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await SendAsync<MyGuild>(HttpMethod.Post, $"{b}/guilds", input, ct).ConfigureAwait(false) ?? new MyGuild();
+        }
+
+        /// <summary>POST <c>/guilds/:guildId/join</c>: join an open guild, or ask to join a request guild.</summary>
+        public async Task<GuildJoinResult> JoinAsync(
+            string guildId, string? message = null, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?>();
+            if (message != null) body["message"] = message;
+            return await SendAsync<GuildJoinResult>(HttpMethod.Post, $"{b}/guilds/{Uri.EscapeDataString(guildId)}/join", body, ct)
+                .ConfigureAwait(false) ?? new GuildJoinResult();
+        }
+
+        /// <summary>GET <c>/guild-requests</c>: your pending join requests.</summary>
+        public async Task<List<GuildJoinRequest>> MyRequestsAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var data = await SendAsync<GuildRequestsPayload>(HttpMethod.Get, $"{b}/guild-requests", null, ct).ConfigureAwait(false);
+            return data?.Requests ?? new List<GuildJoinRequest>();
+        }
+
+        /// <summary>DELETE <c>/guild-requests/:requestId</c>: withdraw a join request.</summary>
+        public async Task CancelRequestAsync(string requestId, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            await SendAsync<Newtonsoft.Json.Linq.JObject>(HttpMethod.Delete, $"{b}/guild-requests/{Uri.EscapeDataString(requestId)}", null, ct)
+                .ConfigureAwait(false);
+        }
+
+        /// <summary>PATCH <c>/guild</c>: edit the profile (needs <c>edit_profile</c>).</summary>
+        public async Task<GuildDetail> UpdateProfileAsync(GuildProfileInput patch, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await SendAsync<GuildDetail>(new HttpMethod("PATCH"), $"{b}/guild", patch, ct).ConfigureAwait(false)
+                ?? new GuildDetail();
+        }
+
+        /// <summary>POST <c>/guild/leave</c>: a leaving leader hands over; the last one out disbands.</summary>
+        public async Task<GuildLeaveResult> LeaveAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await SendAsync<GuildLeaveResult>(HttpMethod.Post, $"{b}/guild/leave", null, ct).ConfigureAwait(false)
+                ?? new GuildLeaveResult();
+        }
+
+        /// <summary>GET <c>/guild/requests</c>: your guild's pending join requests (needs <c>accept_requests</c>).</summary>
+        public async Task<List<GuildJoinRequest>> RequestsAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var data = await SendAsync<GuildRequestsPayload>(HttpMethod.Get, $"{b}/guild/requests", null, ct).ConfigureAwait(false);
+            return data?.Requests ?? new List<GuildJoinRequest>();
+        }
+
+        /// <summary>POST <c>/guild/requests/:requestId/accept</c>.</summary>
+        public async Task<GuildDetail> AcceptRequestAsync(string requestId, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await SendAsync<GuildDetail>(HttpMethod.Post, $"{b}/guild/requests/{Uri.EscapeDataString(requestId)}/accept", null, ct)
+                .ConfigureAwait(false) ?? new GuildDetail();
+        }
+
+        /// <summary>POST <c>/guild/requests/:requestId/decline</c>.</summary>
+        public async Task DeclineRequestAsync(string requestId, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            await SendAsync<Newtonsoft.Json.Linq.JObject>(HttpMethod.Post, $"{b}/guild/requests/{Uri.EscapeDataString(requestId)}/decline", null, ct)
+                .ConfigureAwait(false);
+        }
+
+        /// <summary>POST <c>/guild/members/:id/kick</c>: they can't rejoin this guild for the configured block.</summary>
+        public Task<GuildDetail> KickAsync(string memberExternalId, string? @as = null, CancellationToken ct = default)
+            => MemberActionAsync("kick", memberExternalId, @as, ct);
+
+        /// <summary>POST <c>/guild/members/:id/promote</c>: member → co-leader.</summary>
+        public Task<GuildDetail> PromoteAsync(string memberExternalId, string? @as = null, CancellationToken ct = default)
+            => MemberActionAsync("promote", memberExternalId, @as, ct);
+
+        /// <summary>POST <c>/guild/members/:id/demote</c>: co-leader → member.</summary>
+        public Task<GuildDetail> DemoteAsync(string memberExternalId, string? @as = null, CancellationToken ct = default)
+            => MemberActionAsync("demote", memberExternalId, @as, ct);
+
+        private async Task<GuildDetail> MemberActionAsync(string verb, string memberExternalId, string? @as, CancellationToken ct)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await SendAsync<GuildDetail>(HttpMethod.Post, $"{b}/guild/members/{Uri.EscapeDataString(memberExternalId)}/{verb}", null, ct)
+                .ConfigureAwait(false) ?? new GuildDetail();
+        }
+
+        /// <summary>POST <c>/guild/leader</c>: hand leadership to a member (leader only).</summary>
+        public async Task<GuildDetail> TransferLeadershipAsync(string memberExternalId, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?> { ["externalPlayerId"] = memberExternalId };
+            return await SendAsync<GuildDetail>(HttpMethod.Post, $"{b}/guild/leader", body, ct).ConfigureAwait(false)
+                ?? new GuildDetail();
+        }
+
+        /// <summary>GET <c>/guild/help</c>: open help requests, yours, and your weekly helps counter.</summary>
+        public async Task<GuildHelpOverview> HelpAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await SendAsync<GuildHelpOverview>(HttpMethod.Get, $"{b}/guild/help", null, ct).ConfigureAwait(false)
+                ?? new GuildHelpOverview();
+        }
+
+        /// <summary>POST <c>/guild/help</c>: ask guildmates for a resource on the game's help list.</summary>
+        public async Task<GuildHelpRequest> RequestHelpAsync(
+            string type, string resourceKey, int amount, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?> { ["type"] = type, ["resourceKey"] = resourceKey, ["amount"] = amount };
+            return await SendAsync<GuildHelpRequest>(HttpMethod.Post, $"{b}/guild/help", body, ct).ConfigureAwait(false)
+                ?? new GuildHelpRequest();
+        }
+
+        /// <summary>POST <c>/guild/help/:requestId/donate</c>: delivered to them as a grant; may reward you.</summary>
+        public async Task<GuildHelpDonation> DonateAsync(
+            string requestId, int? amount = null, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?>();
+            if (amount.HasValue) body["amount"] = amount.Value;
+            return await SendAsync<GuildHelpDonation>(HttpMethod.Post, $"{b}/guild/help/{Uri.EscapeDataString(requestId)}/donate", body, ct)
+                .ConfigureAwait(false) ?? new GuildHelpDonation();
+        }
+
+        /// <summary>DELETE <c>/guild/help/:requestId</c>: withdraw your own help request.</summary>
+        public async Task<GuildHelpRequest> CancelHelpAsync(string requestId, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await SendAsync<GuildHelpRequest>(HttpMethod.Delete, $"{b}/guild/help/{Uri.EscapeDataString(requestId)}", null, ct)
+                .ConfigureAwait(false) ?? new GuildHelpRequest();
+        }
+    }
+
+    /// <summary>
+    /// Resource client for chat (docs/26): <c>/sdk/v1/players/:p/chat/*</c>.
+    /// Direct messages, groups, guild chat and public channels, plus the live
+    /// stream. Every call acts as the active player (or <c>@as</c>). Chat is a
+    /// paid add-on: when it's off for the game every call throws
+    /// <see cref="KratyApiError"/> <c>403 chat_disabled</c>.
+    ///
+    /// <para>
+    /// When <see cref="KratyClientOptions.ChatProfanityFilter"/> is set, every
+    /// call (and the stream) sends <c>X-Kraty-Chat-Filter: on|off</c>.
+    /// </para>
+    /// </summary>
+    public sealed class ChatClient
+    {
+        private static readonly JsonSerializer PlainJson = JsonSerializer.Create();
+        private readonly KratyClient _client;
+        public ChatClient(KratyClient client) => _client = client;
+
+        private async Task<string> BaseAsync(string? @as, CancellationToken ct)
+        {
+            var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            return $"/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}/chat";
+        }
+
+        private async Task<string> ConversationPathAsync(string conversationId, string? @as, CancellationToken ct)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return $"{b}/conversations/{Uri.EscapeDataString(conversationId)}";
+        }
+
+        private Dictionary<string, string>? FilterHeaders()
+        {
+            var filter = _client.ChatFilterValue;
+            return filter == null ? null : new Dictionary<string, string> { [ChatStreamFactory.FilterHeader] = filter };
+        }
+
+        private async Task<T?> CallAsync<T>(HttpMethod method, string path, object? body, CancellationToken ct)
+        {
+            var env = await _client.RequestWithHeadersAsync<DataEnvelope<T>>(method, path, body, FilterHeaders(), ct)
+                .ConfigureAwait(false);
+            return env.Data;
+        }
+
+        // Free-form JSON (payload / metadata) keeps the caller's keys exactly:
+        // the SDK's camelCase settings would otherwise rewrite dictionary keys.
+        private static JToken? Raw(object? value) =>
+            value == null ? null : value as JToken ?? JToken.FromObject(value, PlainJson);
+
+        private static string Query(params (string Key, string? Value)[] pairs)
+        {
+            var parts = new List<string>();
+            foreach (var (key, value) in pairs)
+            {
+                if (string.IsNullOrEmpty(value)) continue;
+                parts.Add($"{key}={Uri.EscapeDataString(value)}");
+            }
+            return parts.Count == 0 ? string.Empty : "?" + string.Join("&", parts);
+        }
+
+        // ── Config, preferences, inbox ──────────────────────────────
+
+        /// <summary>GET <c>/chat/config</c>: kinds, channels, message rules, rate limit, your preferences and moderation standing.</summary>
+        public async Task<ChatClientConfig> ConfigAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await CallAsync<ChatClientConfig>(HttpMethod.Get, $"{b}/config", null, ct).ConfigureAwait(false)
+                ?? new ChatClientConfig();
+        }
+
+        /// <summary>GET <c>/chat/preferences</c>: the player's saved filter choice and who may DM them.</summary>
+        public async Task<ChatPreferences> PreferencesAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await CallAsync<ChatPreferences>(HttpMethod.Get, $"{b}/preferences", null, ct).ConfigureAwait(false)
+                ?? new ChatPreferences();
+        }
+
+        /// <summary>
+        /// PUT <c>/chat/preferences</c>: save the player's choices. Only the
+        /// properties you assign on <paramref name="update"/> are sent; assign
+        /// <c>ProfanityFilter = null</c> to clear back to the kinds' defaults.
+        /// </summary>
+        public async Task<ChatPreferences> SetPreferencesAsync(
+            ChatPreferencesUpdate update, string? @as = null, CancellationToken ct = default)
+        {
+            if (update == null) throw new ArgumentNullException(nameof(update));
+            if (!update.HasProfanityFilter && update.AllowDirectFrom == null)
+                throw new ArgumentException("nothing to update: set ProfanityFilter and/or AllowDirectFrom", nameof(update));
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?>();
+            if (update.HasProfanityFilter) body["profanityFilter"] = update.ProfanityFilter;
+            if (update.AllowDirectFrom != null) body["allowDirectFrom"] = update.AllowDirectFrom;
+            return await CallAsync<ChatPreferences>(HttpMethod.Put, $"{b}/preferences", body, ct).ConfigureAwait(false)
+                ?? new ChatPreferences();
+        }
+
+        /// <summary>
+        /// GET <c>/chat/conversations</c>: the inbox, most recent first
+        /// (<paramref name="limit"/> default 30, max 100). Narrow with
+        /// <paramref name="kind"/>; page with <c>NextOffset</c>.
+        /// </summary>
+        public async Task<ChatConversationPage> ConversationsAsync(
+            string? kind = null, int? limit = null, int? offset = null,
+            string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var qs = Query(("kind", kind), ("limit", limit?.ToString()), ("offset", offset is > 0 ? offset.ToString() : null));
+            return await CallAsync<ChatConversationPage>(HttpMethod.Get, $"{b}/conversations{qs}", null, ct).ConfigureAwait(false)
+                ?? new ChatConversationPage();
+        }
+
+        /// <summary>GET <c>/chat/unread</c>: unread totals for a badge (muted conversations don't count).</summary>
+        public async Task<ChatUnread> UnreadAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await CallAsync<ChatUnread>(HttpMethod.Get, $"{b}/unread", null, ct).ConfigureAwait(false)
+                ?? new ChatUnread();
+        }
+
+        /// <summary>GET <c>/chat/conversations/:id</c>: one conversation, with <c>Members</c> for groups.</summary>
+        public async Task<ChatConversation> ConversationAsync(
+            string conversationId, string? @as = null, CancellationToken ct = default)
+        {
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            return await CallAsync<ChatConversation>(HttpMethod.Get, path, null, ct).ConfigureAwait(false)
+                ?? new ChatConversation();
+        }
+
+        // ── Opening conversations ───────────────────────────────────
+
+        /// <summary>
+        /// POST <c>/chat/direct</c>: open (or find) the direct conversation
+        /// with another player, by external id or by
+        /// <paramref name="friendCode"/> (pass exactly one).
+        /// </summary>
+        public async Task<ChatConversation> OpenDirectAsync(
+            string? externalPlayerId = null, string? friendCode = null,
+            string? @as = null, CancellationToken ct = default)
+        {
+            if ((externalPlayerId == null) == (friendCode == null))
+                throw new ArgumentException("pass exactly one of externalPlayerId or friendCode");
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?>();
+            if (externalPlayerId != null) body["externalPlayerId"] = externalPlayerId;
+            else body["friendCode"] = friendCode;
+            return await CallAsync<ChatConversation>(HttpMethod.Post, $"{b}/direct", body, ct).ConfigureAwait(false)
+                ?? new ChatConversation();
+        }
+
+        /// <summary>POST <c>/chat/groups</c>: create a group you own; returns it with <c>Members</c>.</summary>
+        public async Task<ChatConversation> CreateGroupAsync(
+            string title, IEnumerable<string>? externalPlayerIds = null, Dictionary<string, object?>? metadata = null,
+            string? @as = null, CancellationToken ct = default)
+        {
+            if (string.IsNullOrEmpty(title)) throw new ArgumentException("title is required", nameof(title));
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?>
+            {
+                ["title"] = title,
+                ["externalPlayerIds"] = externalPlayerIds?.ToList() ?? new List<string>(),
+            };
+            if (metadata != null) body["metadata"] = Raw(metadata);
+            return await CallAsync<ChatConversation>(HttpMethod.Post, $"{b}/groups", body, ct).ConfigureAwait(false)
+                ?? new ChatConversation();
+        }
+
+        /// <summary>PATCH <c>/chat/conversations/:id</c>: rename a group or replace its metadata (owner / admin).</summary>
+        public async Task<ChatConversation> UpdateGroupAsync(
+            string conversationId, string? title = null, Dictionary<string, object?>? metadata = null,
+            string? @as = null, CancellationToken ct = default)
+        {
+            if (title == null && metadata == null)
+                throw new ArgumentException("nothing to update: pass title and/or metadata");
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?>();
+            if (title != null) body["title"] = title;
+            if (metadata != null) body["metadata"] = Raw(metadata);
+            return await CallAsync<ChatConversation>(new HttpMethod("PATCH"), path, body, ct).ConfigureAwait(false)
+                ?? new ChatConversation();
+        }
+
+        /// <summary>POST <c>/chat/conversations/:id/members</c>: add players to a group.</summary>
+        public async Task<ChatConversation> AddMembersAsync(
+            string conversationId, IEnumerable<string> externalPlayerIds,
+            string? @as = null, CancellationToken ct = default)
+        {
+            if (externalPlayerIds == null) throw new ArgumentNullException(nameof(externalPlayerIds));
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?> { ["externalPlayerIds"] = externalPlayerIds.ToList() };
+            return await CallAsync<ChatConversation>(HttpMethod.Post, $"{path}/members", body, ct).ConfigureAwait(false)
+                ?? new ChatConversation();
+        }
+
+        /// <summary>DELETE <c>/chat/conversations/:id/members/:externalPlayerId</c>: remove a member from a group.</summary>
+        public async Task<ChatMemberRemoved> RemoveMemberAsync(
+            string conversationId, string externalPlayerId,
+            string? @as = null, CancellationToken ct = default)
+        {
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            return await CallAsync<ChatMemberRemoved>(
+                HttpMethod.Delete, $"{path}/members/{Uri.EscapeDataString(externalPlayerId)}", null, ct
+            ).ConfigureAwait(false) ?? new ChatMemberRemoved();
+        }
+
+        /// <summary>PUT <c>/chat/conversations/:id/members/:externalPlayerId/role</c>: <c>owner</c>, <c>admin</c> or <c>member</c>.</summary>
+        public async Task<ChatConversation> SetRoleAsync(
+            string conversationId, string externalPlayerId, string role,
+            string? @as = null, CancellationToken ct = default)
+        {
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?> { ["role"] = role };
+            return await CallAsync<ChatConversation>(
+                HttpMethod.Put, $"{path}/members/{Uri.EscapeDataString(externalPlayerId)}/role", body, ct
+            ).ConfigureAwait(false) ?? new ChatConversation();
+        }
+
+        /// <summary>POST <c>/chat/conversations/:id/leave</c>: leave a group (an owner hands over first).</summary>
+        public async Task<ChatLeaveResult> LeaveAsync(
+            string conversationId, string? @as = null, CancellationToken ct = default)
+        {
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            return await CallAsync<ChatLeaveResult>(HttpMethod.Post, $"{path}/leave", null, ct).ConfigureAwait(false)
+                ?? new ChatLeaveResult();
+        }
+
+        /// <summary>GET <c>/chat/guild</c>: your guild's conversation (<c>409 conflict</c> when guildless).</summary>
+        public async Task<ChatConversation> GuildAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await CallAsync<ChatConversation>(HttpMethod.Get, $"{b}/guild", null, ct).ConfigureAwait(false)
+                ?? new ChatConversation();
+        }
+
+        /// <summary>GET <c>/chat/channels</c>: the game's public channels as conversations.</summary>
+        public async Task<List<ChatConversation>> ChannelsAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var data = await CallAsync<ChatChannelsPayload>(HttpMethod.Get, $"{b}/channels", null, ct).ConfigureAwait(false);
+            return data?.Channels ?? new List<ChatConversation>();
+        }
+
+        /// <summary>GET <c>/chat/channels/:channelKey</c>: one public channel's conversation.</summary>
+        public async Task<ChatConversation> ChannelAsync(
+            string channelKey, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await CallAsync<ChatConversation>(HttpMethod.Get, $"{b}/channels/{Uri.EscapeDataString(channelKey)}", null, ct)
+                .ConfigureAwait(false) ?? new ChatConversation();
+        }
+
+        // ── Messages ────────────────────────────────────────────────
+
+        /// <summary>
+        /// GET <c>/chat/conversations/:id/messages</c>: a page of messages,
+        /// oldest to newest. No cursor = the latest page; <paramref name="before"/>
+        /// pages back, <paramref name="after"/> catches up (e.g. after a
+        /// stream reconnect). Pass one cursor at most.
+        /// </summary>
+        public async Task<ChatMessagePage> MessagesAsync(
+            string conversationId, long? before = null, long? after = null, int? limit = null,
+            string? @as = null, CancellationToken ct = default)
+        {
+            if (before.HasValue && after.HasValue)
+                throw new ArgumentException("pass before or after, not both");
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            var qs = Query(("before", before?.ToString()), ("after", after?.ToString()), ("limit", limit?.ToString()));
+            return await CallAsync<ChatMessagePage>(HttpMethod.Get, $"{path}/messages{qs}", null, ct).ConfigureAwait(false)
+                ?? new ChatMessagePage();
+        }
+
+        /// <summary>
+        /// POST <c>/chat/conversations/:id/messages</c>: send a text message.
+        /// <paramref name="clientMessageId"/> defaults to a fresh GUID, so a
+        /// retried send returns the original message instead of posting twice;
+        /// pass your own to match the echo to a pending local bubble.
+        /// </summary>
+        public Task<ChatMessage> SendAsync(
+            string conversationId, string text, string? replyToId = null, string? clientMessageId = null,
+            string? @as = null, CancellationToken ct = default)
+        {
+            if (text == null) throw new ArgumentNullException(nameof(text));
+            var body = new Dictionary<string, object?> { ["type"] = "text", ["text"] = text };
+            return PostMessageAsync(conversationId, body, replyToId, clientMessageId, @as, ct);
+        }
+
+        /// <summary>
+        /// POST <c>/chat/conversations/:id/messages</c> with <c>type: custom</c>:
+        /// a game card (<paramref name="customType"/> is one of the config's
+        /// <c>Messages.CustomTypes</c>) with an optional caption.
+        /// <paramref name="payload"/> may be a <see cref="JToken"/>, a dictionary
+        /// or a POCO; its keys are sent exactly as given. Auto-generates
+        /// <paramref name="clientMessageId"/> like <see cref="SendAsync"/>.
+        /// </summary>
+        public Task<ChatMessage> SendCustomAsync(
+            string conversationId, string customType, object? payload, string? text = null,
+            string? replyToId = null, string? clientMessageId = null,
+            string? @as = null, CancellationToken ct = default)
+        {
+            if (string.IsNullOrEmpty(customType)) throw new ArgumentException("customType is required", nameof(customType));
+            var body = new Dictionary<string, object?> { ["type"] = "custom", ["customType"] = customType };
+            if (payload != null) body["payload"] = Raw(payload);
+            if (text != null) body["text"] = text;
+            return PostMessageAsync(conversationId, body, replyToId, clientMessageId, @as, ct);
+        }
+
+        private async Task<ChatMessage> PostMessageAsync(
+            string conversationId, Dictionary<string, object?> body, string? replyToId, string? clientMessageId,
+            string? @as, CancellationToken ct)
+        {
+            if (replyToId != null) body["replyToId"] = replyToId;
+            body["clientMessageId"] = string.IsNullOrEmpty(clientMessageId) ? Guid.NewGuid().ToString() : clientMessageId;
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            return await CallAsync<ChatMessage>(HttpMethod.Post, $"{path}/messages", body, ct).ConfigureAwait(false)
+                ?? new ChatMessage();
+        }
+
+        /// <summary>
+        /// PATCH <c>/chat/conversations/:id/messages/:messageId</c>: edit the
+        /// text of your own message within the game's edit window
+        /// (<c>Config.Messages.EditWindowSeconds</c>; 0 = editing off). Returns the
+        /// updated message with <see cref="ChatMessage.EditedAt"/> set; the
+        /// conversation's live streams receive <c>message_edited</c>. Outside the
+        /// window, or on someone else's message: <c>403 chat_edit_not_allowed</c>.
+        /// </summary>
+        public async Task<ChatMessage> EditMessageAsync(
+            string conversationId, string messageId, string text, string? @as = null, CancellationToken ct = default)
+        {
+            if (text == null) throw new ArgumentNullException(nameof(text));
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?> { ["text"] = text };
+            return await CallAsync<ChatMessage>(
+                new HttpMethod("PATCH"), $"{path}/messages/{Uri.EscapeDataString(messageId)}", body, ct
+            ).ConfigureAwait(false) ?? new ChatMessage();
+        }
+
+        /// <summary>DELETE <c>/chat/conversations/:id/messages/:messageId</c>: delete your own message (or any, as a moderator here).</summary>
+        public async Task<ChatMessageDeleted> DeleteMessageAsync(
+            string conversationId, string messageId, string? @as = null, CancellationToken ct = default)
+        {
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            return await CallAsync<ChatMessageDeleted>(
+                HttpMethod.Delete, $"{path}/messages/{Uri.EscapeDataString(messageId)}", null, ct
+            ).ConfigureAwait(false) ?? new ChatMessageDeleted();
+        }
+
+        /// <summary>POST <c>/chat/conversations/:id/read</c>: mark read up to <paramref name="seq"/> (never moves backwards).</summary>
+        public async Task<ChatReadResult> MarkReadAsync(
+            string conversationId, long seq, string? @as = null, CancellationToken ct = default)
+        {
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?> { ["seq"] = seq };
+            return await CallAsync<ChatReadResult>(HttpMethod.Post, $"{path}/read", body, ct).ConfigureAwait(false)
+                ?? new ChatReadResult();
+        }
+
+        /// <summary>POST <c>/chat/conversations/:id/typing</c>: show a typing indicator to the others (call every few seconds while typing).</summary>
+        public async Task TypingAsync(string conversationId, string? @as = null, CancellationToken ct = default)
+        {
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            await CallAsync<JObject>(HttpMethod.Post, $"{path}/typing", new Dictionary<string, object?>(), ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// PUT <c>/chat/conversations/:id/settings</c>: mute notifications
+        /// until a time (assign <c>MutedUntil = null</c> to unmute) and/or hide
+        /// the conversation from the inbox. Only assigned properties are sent.
+        /// </summary>
+        public async Task<ChatConversation> SetConversationSettingsAsync(
+            string conversationId, ChatConversationSettings settings,
+            string? @as = null, CancellationToken ct = default)
+        {
+            if (settings == null) throw new ArgumentNullException(nameof(settings));
+            if (!settings.HasMutedUntil && settings.Hidden == null)
+                throw new ArgumentException("nothing to update: set MutedUntil and/or Hidden", nameof(settings));
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            var body = new Dictionary<string, object?>();
+            if (settings.HasMutedUntil)
+            {
+                body["mutedUntil"] = settings.MutedUntil?.ToUniversalTime()
+                    .ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+            }
+            if (settings.Hidden != null) body["hidden"] = settings.Hidden.Value;
+            return await CallAsync<ChatConversation>(HttpMethod.Put, $"{path}/settings", body, ct).ConfigureAwait(false)
+                ?? new ChatConversation();
+        }
+
+        // ── Live stream ─────────────────────────────────────────────
+
+        /// <summary>
+        /// GET <c>/chat/stream</c>: one SSE stream with every conversation in
+        /// the player's inbox plus the public <paramref name="channels"/> named
+        /// (at most 10). Message text arrives resolved for this player, and
+        /// messages from blocked players never arrive.
+        ///
+        /// <para>
+        /// Wire callbacks in <paramref name="configure"/>: it runs before the
+        /// read loop starts, so nothing (not even <c>ready</c>) can fire
+        /// first. Callbacks run on the HTTP background thread. The stream
+        /// does NOT auto-reconnect; on <c>OnClose</c> / <c>OnError</c>, reopen
+        /// and catch up with <see cref="MessagesAsync"/>'s <c>after</c>.
+        /// </para>
+        /// <code>
+        /// var stream = await kraty.Chat.LiveAsync(new[] { "global" }, s =>
+        /// {
+        ///     s.OnMessage = m => dispatcher.Enqueue(() => AppendBubble(m));
+        ///     s.OnClose = _ => ScheduleReconnect();
+        /// });
+        /// // later
+        /// await stream.CancelAsync();
+        /// </code>
+        /// </summary>
+        public async Task<ChatStream> LiveAsync(
+            IEnumerable<string>? channels = null, Action<ChatStream>? configure = null,
+            string? @as = null, CancellationToken ct = default)
+        {
+            var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            return await ChatStreamFactory.OpenAsync(
+                _client.HttpForStreaming,
+                _client.BaseUrlForStreaming,
+                externalPlayerId,
+                _client.AuthHeaderForStreaming,
+                _client.PlayerSecretForStreaming,
+                channels,
+                _client.ChatFilterValue,
+                configure,
+                ct
+            ).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Resource client for player safety (docs/26):
+    /// <c>/sdk/v1/players/:p/reports</c> and <c>/moderation/*</c>. Works in
+    /// every game, with or without the chat add-on, so the game can offer a
+    /// report button anywhere (store compliance).
+    /// </summary>
+    public sealed class ModerationClient
+    {
+        private readonly KratyClient _client;
+        public ModerationClient(KratyClient client) => _client = client;
+
+        private async Task<string> BaseAsync(string? @as, CancellationToken ct)
+        {
+            var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            return $"/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}";
+        }
+
+        private async Task<T?> CallAsync<T>(HttpMethod method, string path, object? body, CancellationToken ct)
+        {
+            var env = await _client.RequestAsync<DataEnvelope<T>>(method, path, body: body, cancellationToken: ct)
+                .ConfigureAwait(false);
+            return env.Data;
+        }
+
+        /// <summary>
+        /// POST <c>/reports</c>: report another player. Attach
+        /// <c>ConversationId</c> + <c>MessageIds</c> for chat reports so the
+        /// reviewer sees the evidence.
+        /// </summary>
+        public async Task<MyReport> ReportAsync(ReportPlayerInput input, string? @as = null, CancellationToken ct = default)
+        {
+            if (input == null) throw new ArgumentNullException(nameof(input));
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await CallAsync<MyReport>(HttpMethod.Post, $"{b}/reports", input, ct).ConfigureAwait(false)
+                ?? new MyReport();
+        }
+
+        /// <summary>GET <c>/reports</c>: the reports this player filed, newest first (<paramref name="limit"/> default 20, max 100).</summary>
+        public async Task<List<MyReport>> ReportsAsync(int? limit = null, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var qs = limit.HasValue ? $"?limit={limit.Value}" : string.Empty;
+            var data = await CallAsync<MyReportsPayload>(HttpMethod.Get, $"{b}/reports{qs}", null, ct).ConfigureAwait(false);
+            return data?.Reports ?? new List<MyReport>();
+        }
+
+        /// <summary>GET <c>/moderation/status</c>: can the player chat / post, and the restrictions in force.</summary>
+        public async Task<ModerationStatus> StatusAsync(string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await CallAsync<ModerationStatus>(HttpMethod.Get, $"{b}/moderation/status", null, ct).ConfigureAwait(false)
+                ?? new ModerationStatus();
+        }
+
+        /// <summary>POST <c>/moderation/warnings/:restrictionId/acknowledge</c>: the player saw the warning; it stops showing.</summary>
+        public async Task<Restriction> AcknowledgeWarningAsync(
+            string restrictionId, string? @as = null, CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            return await CallAsync<Restriction>(
+                HttpMethod.Post, $"{b}/moderation/warnings/{Uri.EscapeDataString(restrictionId)}/acknowledge", null, ct
+            ).ConfigureAwait(false) ?? new Restriction();
         }
     }
 
