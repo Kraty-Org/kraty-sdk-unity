@@ -1037,17 +1037,21 @@ namespace Kraty
         ///
         /// <example>
         /// <code>
+        /// var product = args.purchasedProduct;
         /// var result = await kraty.TrackPurchaseAsync(new TrackPurchaseInput
         /// {
-        ///     TransactionId = args.purchasedProduct.transactionID,
+        ///     // Google Play: the receipt's orderId, the id your server reports too.
+        ///     TransactionId = StoreTransactions.FromUnityIap("google_play", product.transactionID, product.receipt),
         ///     Store         = "google_play",
         ///     ProductId     = args.purchasedProduct.definition.id,
         ///     ProductType   = "consumable",
         ///     AmountMinor   = 2990,   // R$29.90 — minor units, as charged
         ///     Currency      = "BRL",
         ///     Receipt       = args.purchasedProduct.receipt,
+        ///     OfferInstanceId = offer?.InstanceId, // when bought from kraty.Offers.ListAsync()
         /// });
         /// // result.NormalizedAmountMinor == 520  ($5.20)
+        /// // result.Offer?.StudioFulfils == true → deliver result.Offer.Contents yourself
         /// </code>
         /// </example>
         ///
@@ -1993,6 +1997,273 @@ namespace Kraty
                 cancellationToken: ct
             ).ConfigureAwait(false);
             return env.Data;
+        }
+    }
+
+    /// <summary>
+    /// Resource client for <c>/sdk/v1/players/:p/offers</c> (docs/26):
+    /// real-money offers such as starter packs, bundles and chains.
+    ///
+    /// <para>
+    /// The flow: <see cref="ListAsync"/> what to show;
+    /// <see cref="MarkShownAsync"/> when an offer is actually on screen (that
+    /// starts a "from first shown" timer, so don't call it for offers you only
+    /// prefetched); sell <c>offer.Current.Skus[yourStore]</c>; then report the
+    /// store transaction with <c>kraty.TrackPurchaseAsync(new TrackPurchaseInput
+    /// { …, OfferInstanceId = offer.InstanceId })</c>. When the result's
+    /// <c>Offer.StudioFulfils</c> is true (the default), deliver
+    /// <c>Offer.Contents</c> yourself, as you fulfil any IAP.
+    /// </para>
+    /// </summary>
+    public sealed class OffersClient
+    {
+        private readonly KratyClient _client;
+        public OffersClient(KratyClient client) => _client = client;
+
+        private async Task<string> BaseAsync(string? @as, CancellationToken ct)
+        {
+            var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
+            return $"/sdk/v1/players/{Uri.EscapeDataString(externalPlayerId)}/offers";
+        }
+
+        /// <summary>
+        /// GET <c>/sdk/v1/players/:p/offers</c>: the offers to show now, highest
+        /// priority first (<paramref name="limit"/> ≤ 20, default 10).
+        /// <paramref name="level"/> is the player's current level, for offers
+        /// that trigger on reaching one. Listing is not an impression.
+        /// </summary>
+        public async Task<List<Offer>> ListAsync(
+            int? limit = null,
+            int? level = null,
+            string? @as = null,
+            CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var parts = new List<string>();
+            if (limit.HasValue) parts.Add($"limit={limit.Value}");
+            if (level.HasValue) parts.Add($"level={level.Value}");
+            var qs = parts.Count == 0 ? string.Empty : "?" + string.Join("&", parts);
+            var env = await _client.RequestAsync<DataEnvelope<List<Offer>>>(
+                HttpMethod.Get, b + qs, cancellationToken: ct).ConfigureAwait(false);
+            return env.Data ?? new List<Offer>();
+        }
+
+        /// <summary>
+        /// POST <c>…/offers/:instanceId/impression</c>: the offer is on screen
+        /// now. Idempotent (the SDK generates the key when you don't pass one).
+        /// <c>Capped</c> is true when the offer's impression cap refused it.
+        /// </summary>
+        public async Task<OfferImpressionResult> MarkShownAsync(
+            string instanceId,
+            string? idempotencyKey = null,
+            string? @as = null,
+            CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var env = await _client.RequestAsync<DataEnvelope<OfferImpressionResult>>(
+                HttpMethod.Post,
+                $"{b}/{Uri.EscapeDataString(instanceId)}/impression",
+                body: KeyBody(idempotencyKey),
+                cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new OfferImpressionResult();
+        }
+
+        /// <summary>
+        /// POST <c>…/offers/:instanceId/dismiss</c>: the player closed the offer
+        /// without buying. Answers the offer after the dismiss.
+        /// </summary>
+        public async Task<Offer> DismissAsync(
+            string instanceId,
+            string? idempotencyKey = null,
+            string? @as = null,
+            CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var env = await _client.RequestAsync<DataEnvelope<Offer>>(
+                HttpMethod.Post,
+                $"{b}/{Uri.EscapeDataString(instanceId)}/dismiss",
+                body: KeyBody(idempotencyKey),
+                cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new Offer();
+        }
+
+        /// <summary>
+        /// POST <c>…/offers/triggers</c>: report a fail, a depleted resource or a
+        /// level (<see cref="OfferTriggerInput.FailEvent"/>,
+        /// <see cref="OfferTriggerInput.ResourceDepleted"/>,
+        /// <see cref="OfferTriggerInput.LevelReached"/>) so the offers listening
+        /// to it arm. Answers the newly armed offers that can be shown now
+        /// (empty when none did; they also show up on the next
+        /// <see cref="ListAsync"/>). <paramref name="playerContext"/> feeds offer
+        /// eligibility. Idempotent (the SDK generates the key when you don't
+        /// pass one). Win-back offers need no call: they arm when a session
+        /// opens after a break.
+        /// </summary>
+        public async Task<OfferTriggerResult> TriggerAsync(
+            OfferTriggerInput input,
+            Dictionary<string, object?>? playerContext = null,
+            string? idempotencyKey = null,
+            string? @as = null,
+            CancellationToken ct = default)
+        {
+            if (input == null) throw new ArgumentNullException(nameof(input));
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var body = KeyBody(idempotencyKey);
+            body["trigger"] = input;
+            if (playerContext != null) body["playerContext"] = playerContext;
+            var env = await _client.RequestAsync<DataEnvelope<OfferTriggerResult>>(
+                HttpMethod.Post, $"{b}/triggers", body: body, cancellationToken: ct).ConfigureAwait(false);
+            return env.Data ?? new OfferTriggerResult();
+        }
+
+        /// <summary>
+        /// POST <c>…/offers/:instanceId/claim</c>: claim the current free tier
+        /// of a chain offer (<c>offer.Current.IsFree</c>). Pass the
+        /// <paramref name="tier"/> the player tapped (<c>offer.Tier</c>). No
+        /// store, never revenue. Answers the claim and the offer after it (the
+        /// next tier, or <c>completed</c>). When <c>Claim.StudioFulfils</c> is
+        /// true (the default), deliver <c>Claim.Contents</c> yourself.
+        /// Deliver each claim from one path only (this response or the
+        /// <c>offer.tier_claimed</c> webhook), and de-duplicate on
+        /// <c>Claim.ClaimId</c>.
+        /// Idempotent (the SDK generates the key when you don't pass one). A
+        /// refusal throws <see cref="KratyApiError"/> with
+        /// <c>Code == "conflict"</c>; read its reason (<c>tier_changed</c>,
+        /// <c>tier_not_free</c>, <c>offer_closed</c>) and the offer now with
+        /// <see cref="TryReadClaimRefusal"/>.
+        /// </summary>
+        public async Task<OfferClaimResult> ClaimAsync(
+            string instanceId,
+            int tier,
+            string? idempotencyKey = null,
+            string? @as = null,
+            CancellationToken ct = default)
+        {
+            var b = await BaseAsync(@as, ct).ConfigureAwait(false);
+            var body = KeyBody(idempotencyKey);
+            body["tier"] = tier;
+            var env = await _client.RequestAsync<DataEnvelope<OfferClaimResult>>(
+                HttpMethod.Post,
+                $"{b}/{Uri.EscapeDataString(instanceId)}/claim",
+                body: body,
+                cancellationToken: ct
+            ).ConfigureAwait(false);
+            return env.Data ?? new OfferClaimResult();
+        }
+
+        /// <summary>
+        /// Reads a refused <see cref="ClaimAsync"/> (409 <c>conflict</c>):
+        /// <paramref name="reason"/> is <c>tier_changed</c>,
+        /// <c>tier_not_free</c> or <c>offer_closed</c>, and
+        /// <paramref name="offer"/> the offer as it is now (re-render it).
+        /// False for any other error.
+        /// </summary>
+        public static bool TryReadClaimRefusal(KratyApiError error, out string reason, out Offer? offer)
+        {
+            reason = string.Empty;
+            offer = null;
+            if (error == null || error.Code != "conflict" || error.Details == null) return false;
+            if (!error.Details.TryGetValue("raw", out var raw) || raw is not string json) return false;
+            try
+            {
+                var details = Newtonsoft.Json.Linq.JObject.Parse(json);
+                var r = (string?)details["reason"];
+                if (string.IsNullOrEmpty(r)) return false;
+                reason = r!;
+                offer = details["offer"]?.Type == Newtonsoft.Json.Linq.JTokenType.Object
+                    ? details["offer"]!.ToObject<Offer>()
+                    : null;
+                return true;
+            }
+            catch (Newtonsoft.Json.JsonException)
+            {
+                return false;
+            }
+        }
+
+        // The client stamps a generated key into a dictionary body that has none.
+        private static Dictionary<string, object?> KeyBody(string? idempotencyKey)
+        {
+            var body = new Dictionary<string, object?>();
+            if (!string.IsNullOrEmpty(idempotencyKey)) body["idempotencyKey"] = idempotencyKey;
+            return body;
+        }
+    }
+
+    /// <summary>
+    /// The <c>transactionId</c> to report for a store transaction (docs/22,
+    /// docs/26 § 5.0). Client and server must report the SAME id for one
+    /// transaction, or the purchase is recorded twice:
+    /// <list type="bullet">
+    /// <item>App Store: the StoreKit 2 <c>transactionId</c>, never <c>originalTransactionId</c>;</item>
+    /// <item>Google Play: the <c>orderId</c> (<c>GPA.…</c>), falling back to the
+    /// <c>purchaseToken</c> only for test purchases that have no <c>orderId</c>;</item>
+    /// <item>other stores: their transaction id, unchanged.</item>
+    /// </list>
+    /// </summary>
+    public static class StoreTransactions
+    {
+        /// <summary>
+        /// Pick the canonical id from the store's fields. Throws
+        /// <see cref="ArgumentException"/> when the store's id is missing.
+        /// </summary>
+        public static string CanonicalId(
+            string store,
+            string? transactionId = null,
+            string? orderId = null,
+            string? purchaseToken = null)
+        {
+            string? id = store == "google_play"
+                ? (!string.IsNullOrEmpty(orderId) ? orderId : (!string.IsNullOrEmpty(purchaseToken) ? purchaseToken : null))
+                : (!string.IsNullOrEmpty(transactionId) ? transactionId : null);
+            if (id == null)
+            {
+                throw new ArgumentException(store == "google_play"
+                    ? "CanonicalId: google_play needs orderId (or purchaseToken for test purchases)"
+                    : $"CanonicalId: {store} needs transactionId");
+            }
+            return id;
+        }
+
+        /// <summary>
+        /// The canonical id for a Unity IAP <c>Product</c>: pass its
+        /// <c>transactionID</c> and <c>receipt</c>. On Google Play Unity's
+        /// <c>transactionID</c> is the purchase token, so this reads the
+        /// <c>orderId</c> from the receipt JSON (<c>Payload</c> → <c>json</c>)
+        /// and falls back to the token when there is none. Other stores
+        /// return <paramref name="transactionId"/> unchanged.
+        /// </summary>
+        public static string FromUnityIap(string store, string transactionId, string? receipt)
+        {
+            if (store != "google_play") return CanonicalId(store, transactionId: transactionId);
+            return CanonicalId(store, orderId: GoogleOrderId(receipt), purchaseToken: transactionId);
+        }
+
+        private static string? GoogleOrderId(string? receipt)
+        {
+            if (string.IsNullOrEmpty(receipt)) return null;
+            try
+            {
+                // Unity wraps Google's purchase JSON twice: { Payload: "{ json: \"{ orderId }\" }" }.
+                var outer = Newtonsoft.Json.Linq.JObject.Parse(receipt!);
+                var payload = outer["Payload"]?.Type == Newtonsoft.Json.Linq.JTokenType.String
+                    ? Newtonsoft.Json.Linq.JObject.Parse((string)outer["Payload"]!)
+                    : outer["Payload"] as Newtonsoft.Json.Linq.JObject;
+                var json = payload?["json"];
+                var order = json?.Type == Newtonsoft.Json.Linq.JTokenType.String
+                    ? Newtonsoft.Json.Linq.JObject.Parse((string)json!)
+                    : json as Newtonsoft.Json.Linq.JObject;
+                var orderId = order?["orderId"]?.Type == Newtonsoft.Json.Linq.JTokenType.String
+                    ? (string?)order!["orderId"]
+                    : null;
+                return string.IsNullOrEmpty(orderId) ? null : orderId;
+            }
+            catch (Newtonsoft.Json.JsonException)
+            {
+                return null;
+            }
         }
     }
 

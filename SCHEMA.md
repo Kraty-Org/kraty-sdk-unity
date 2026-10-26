@@ -185,6 +185,68 @@ Task<DailyLogin?> ReadAsync(string? @as = null, CancellationToken ct = default)
 has none or it is off for the key's environment. Read-only: the request's
 session is what pays today's reward (a `daily_login` grant).
 
+## `kraty.Offers`: `OffersClient`
+
+```csharp
+Task<List<Offer>> ListAsync(int? limit = null, int? level = null, string? @as = null, CancellationToken ct = default)
+Task<OfferImpressionResult> MarkShownAsync(string instanceId, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+Task<Offer> DismissAsync(string instanceId, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+Task<OfferTriggerResult> TriggerAsync(OfferTriggerInput input, Dictionary<string, object?>? playerContext = null, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+Task<OfferClaimResult> ClaimAsync(string instanceId, int tier, string? idempotencyKey = null, string? @as = null, CancellationToken ct = default)
+static bool TryReadClaimRefusal(KratyApiError error, out string reason, out Offer? offer)
+
+// OfferTriggerInput factories
+static OfferTriggerInput FailEvent(string key, int? consecutive = null)
+static OfferTriggerInput ResourceDepleted(string resource, int required, int available, int? secondsToRegen = null)
+static OfferTriggerInput LevelReached(int level)
+```
+
+`GET /sdk/v1/players/:p/offers` (`limit` ≤ 20, default 10; `level` for
+`level_reached` offers), `POST …/offers/:instanceId/impression`, `…/dismiss`
+and `…/offers/triggers` (docs/26). Listing is not an impression: call
+`MarkShownAsync` when the offer is on screen (it starts a `first_shown`
+timer). The SDK generates `idempotencyKey` when omitted. Sell
+`offer.Current.Skus[store]` and pass `offer.InstanceId` as
+`TrackPurchaseInput.OfferInstanceId`; when `result.Offer.StudioFulfils` is
+true (the default) the game delivers `result.Offer.Contents` itself.
+`TriggerAsync` answers the newly armed offers that can be shown now (empty
+when none did). Win-back offers need no call.
+
+Free chain tiers: `OfferTier.Type` is `paid` or `free` (`IsFree`). A free
+tier has `StoreProductKey == ""` (null on the wire, kept non-null so the
+field isn't breaking), empty `Skus` and `ReferencePriceMinor == 0`; never
+send it to a store. `ClaimAsync` is `POST …/offers/:instanceId/claim` with
+`{ idempotencyKey, tier }` (`tier` = the `offer.Tier` the player tapped)
+and answers `OfferClaimResult { Claim: OfferClaim, Offer }`: the chain moves
+to the next tier (its timer starts now) or completes. When
+`Claim.StudioFulfils` is true (the default) the game delivers
+`Claim.Contents`. A refusal throws `KratyApiError` (`Code == "conflict"`);
+`OffersClient.TryReadClaimRefusal` gives its reason (`tier_changed`,
+`tier_not_free`, `offer_closed`) and the offer now. Builds on an older SDK
+can't claim free steps (their store call fails; nothing is charged).
+
+Revision 4 (docs/26 § 13): `Offer.VariantKey` is the A/B variant this player
+sees (`Current`, `Next` and `Presentation` already reflect it; null for the
+base config); `Offer.LinkedEventKey` is the linked event's key (show the sale
+on that event's screen), else null. `OfferClaim.VariantKey` and
+`PurchaseOfferResult.VariantKey` name the variant claimed or sold.
+`OfferImpressionResult.CappedReason` (`offer_cycle`, `offer_day`,
+`global_session`, `global_day`, `global_gap`) and `RetryAt` explain a
+refused impression; respect `Capped`. Re-rendering an offer already shown this
+session is never refused by the game-wide caps.
+
+## Store transaction ids (static)
+
+```csharp
+StoreTransactions.CanonicalId(string store, string? transactionId = null, string? orderId = null, string? purchaseToken = null)
+StoreTransactions.FromUnityIap(string store, string transactionId, string? receipt)   // Unity IAP Product.transactionID + .receipt
+```
+
+The `transactionId` client and server must both report: StoreKit 2
+`transactionId` on the App Store, the `orderId` (`GPA.…`) on Google Play
+(read from the Unity receipt JSON; the purchase token only without one),
+other stores unchanged.
+
 ## `kraty.Guilds`: `GuildsClient`
 
 ```csharp
@@ -346,7 +408,13 @@ PlayerPrefsSecretStore        // Unity, wraps UnityEngine.PlayerPrefs (default o
 `StoredIdentity`, `TeamSeatView`, `TeamGoal`, `TeamSeatMilestone`,
 `TeamSeatState`, `TeamClientOptions`, `TeamRollup`, `TeamRollupMilestone`, `LeaderboardEntryTeam`,
 `EventTeamMember`, `EventTeamMembersPage`, `TeamMatchResult`, `PartnerPlayer`,
-`PartnerInvite`, `RandomPartnerResult`, `PartnerSuggestion`.
+`PartnerInvite`, `RandomPartnerResult`, `PartnerSuggestion`,
+`Offer`, `OfferTier`, `OfferPresentation`, `OfferImpressionResult`,
+`OfferTriggerInput`, `OfferTriggerResult`, `OfferClaim`, `OfferClaimResult`,
+`PurchaseOfferResult`.
+
+`TrackPurchaseInput.OfferInstanceId` (optional);
+`TrackPurchaseResult.Offer` (`PurchaseOfferResult?`, null when not attributed).
 
 ## Errors
 

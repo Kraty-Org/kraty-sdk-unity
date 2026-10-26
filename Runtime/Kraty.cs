@@ -39,6 +39,7 @@ namespace Kraty
         public CatalogClient Catalog { get; }
         public DailyLoginClient DailyLogin { get; }
         public GuildsClient Guilds { get; }
+        public OffersClient Offers { get; }
         public ChatClient Chat { get; }
         public ModerationClient Moderation { get; }
 
@@ -58,6 +59,7 @@ namespace Kraty
             Catalog = new CatalogClient(Client);
             DailyLogin = new DailyLoginClient(Client);
             Guilds = new GuildsClient(Client);
+            Offers = new OffersClient(Client);
             Chat = new ChatClient(Client);
             Moderation = new ModerationClient(Client);
         }

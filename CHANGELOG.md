@@ -8,9 +8,28 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 
 ### Features
 
+* **offers:** `kraty.Offers` (`OffersClient`): `ListAsync(limit?, level?)`, `MarkShownAsync(instanceId)`, `DismissAsync(instanceId)` and `TriggerAsync(OfferTriggerInput)` for real-money offers (docs/26), with the `Offer`, `OfferTier`, `OfferPresentation`, `OfferImpressionResult`, `OfferTriggerInput`, `OfferTriggerResult` and `PurchaseOfferResult` types. `TrackPurchaseInput.OfferInstanceId` attributes a purchase to the offer it was bought from; `TrackPurchaseResult.Offer` carries the attribution. New `StoreTransactions.CanonicalId` / `FromUnityIap` helpers report the canonical transaction id (Google Play: the receipt's `orderId`, not Unity's purchase token).
+* **offers:** free chain tiers. `Offers.ClaimAsync(instanceId, tier)` claims the current free step of a chain offer (no store, never revenue) and answers `OfferClaimResult { Claim, Offer }`; `OffersClient.TryReadClaimRefusal` reads a refused claim's reason (`tier_changed`, `tier_not_free`, `offer_closed`) and the current offer. `OfferTier` gains `Type` (`paid` / `free`) and `IsFree`; `StoreProductKey` stays a non-null string (empty on a free tier). New types `OfferClaim` and `OfferClaimResult`. Game builds on an older SDK can't claim free steps: they see a tier with no SKU, the store call fails and nothing is charged.
+* **offers:** Revision 4 (additive). `Offer.VariantKey` (the A/B variant the player sees; `Current`, `Next` and `Presentation` already reflect it) and `Offer.LinkedEventKey` (the linked event's key, or null); `OfferClaim.VariantKey` and `PurchaseOfferResult.VariantKey`. `OfferImpressionResult` gains `CappedReason` (`offer_cycle`, `offer_day`, `global_session`, `global_day`, `global_gap`) and `RetryAt`. Respect `Capped`: the game-wide fatigue caps refuse an impression when the player has seen enough offers; `RetryAt` says when the gap between two offers has passed. Re-renders of an offer already shown this session are never refused.
+* **offers:** delivery default, no API change. New offers default to Kraty delivering their contents (`delivery.grantContents: true`): Kraty grants them (`PurchaseOfferResult.Granted`, `grant.created`; `PendingVerification` until your server reports the purchase verified, test players on test keys at once) and `StudioFulfils` is false, so the game must not grant them too. Deliver `Contents` yourself only when `StudioFulfils` is true (offers switched to "Game delivers"). Existing offers keep their setting.
 * **chat:** `kraty.Chat` (config, preferences, inbox, unread, direct / group / guild / channel conversations, members and roles, messages with auto `clientMessageId`, custom cards, read markers, typing, mute / hide) and the `ChatStream` SSE live stream with typed callbacks; `KratyClientOptions.ChatProfanityFilter` sends `X-Kraty-Chat-Filter`. `kraty.Moderation`: `ReportAsync`, `ReportsAsync`, `StatusAsync`, `AcknowledgeWarningAsync`.
 * **chat:** message editing. `Chat.EditMessageAsync` (own messages, within the game's edit window), `ChatMessage.EditedAt`, `ChatMessageRules.EditWindowSeconds`, and `ChatStream.OnMessageEdited` / `ChatStreamEventKind.MessageEdited` for the `message_edited` stream event.
 * **teams:** co-op team events (additive). `EventListing.Teams` / `TeamFormation` / `TeamOptions`, `Teams` on `StartAttemptResponse`, `ProgressResult` and `FinishAttemptResult`, `ProgressInput.EventTeamId`, team boards (`EventLeaderboard.ParticipantScope`, `LeaderboardEntry.Team`), and `Events.TeamMembersAsync`, `MatchTeamAsync`, `InvitePartnerAsync`, `PartnerInvitesAsync`, `AcceptInviteAsync`, `DeclineInviteAsync`, `CancelInviteAsync`, `RandomPartnerAsync`, `PartnerSuggestionsAsync`, matching the TypeScript client.
+* **events:** new server-side gate reasons, no API change. Events and offers can gate on in-game currency the player spent (`currency_spent_at_least`) and on days since install (`days_since_install_at_least`); a refused `start` carries `unlock_condition_failed` / `entry_requirement_failed` as before, with a message like `spent 12,500 / 1,000,000 diamonds` or `installed 12 / 100 days ago`. The rules are evaluated by Kraty only; nothing to send from the client.
+
+## [0.30.0](https://github.com/Kraty-Org/Kraty/compare/sdk-client-unity-v0.29.2...sdk-client-unity-v0.30.0) (2026-10-25)
+
+
+### Features
+
+* **offers:** monetization offers next to events ([edf6743](https://github.com/Kraty-Org/Kraty/commit/edf67439317ae0435bd38adc7015450558b3be0d))
+* **offers:** monetization offers next to events ([f6206e6](https://github.com/Kraty-Org/Kraty/commit/f6206e6e31fcd973b93f3ee591175d9e8c3b1e16))
+
+
+### Bug Fixes
+
+* **sdk-unity:** ship a .meta for every package file, keep .NET dev files out ([4597037](https://github.com/Kraty-Org/Kraty/commit/4597037a59f837049042bfd46b396f78d949e544))
+* **sdk-unity:** ship a .meta for every package file, keep .NET dev files out ([784c4be](https://github.com/Kraty-Org/Kraty/commit/784c4be46fab69b82e303a93c08fc5833ab123ed))
 
 ## [0.29.2](https://github.com/Kraty-Org/Kraty/compare/sdk-client-unity-v0.29.1...sdk-client-unity-v0.29.2) (2026-10-16)
 

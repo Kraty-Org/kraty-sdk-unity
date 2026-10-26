@@ -1283,8 +1283,16 @@ namespace Kraty
         /// <summary>ISO-8601. Defaults to the server's clock when null.</summary>
         [JsonProperty("purchasedAt")] public string? PurchasedAt { get; set; }
 
-        /// <summary>Arbitrary studio fields: campaign id, offer id, A/B bucket, ….</summary>
+        /// <summary>Arbitrary studio fields: campaign id, A/B bucket, ….</summary>
         [JsonProperty("metadata")] public Dictionary<string, object?>? Metadata { get; set; }
+
+        /// <summary>
+        /// The offer this purchase was made from: <see cref="Offer.InstanceId"/>
+        /// from <see cref="OffersClient.ListAsync"/>. Only a purchase carrying it
+        /// can advance the offer (and, when the offer opted in, have Kraty grant
+        /// its contents); without it the SKU is matched for revenue reporting only.
+        /// </summary>
+        [JsonProperty("offerInstanceId")] public string? OfferInstanceId { get; set; }
     }
 
     /// <summary>
@@ -1331,6 +1339,231 @@ namespace Kraty
         [JsonProperty("lifetimeAmountMinor")] public int LifetimeAmountMinor { get; set; }
 
         [JsonProperty("purchaseCount")] public int PurchaseCount { get; set; }
+
+        /// <summary>
+        /// The offer this purchase was attributed to, or null. When
+        /// <see cref="PurchaseOfferResult.StudioFulfils"/> is true, deliver
+        /// <see cref="PurchaseOfferResult.Contents"/> yourself.
+        /// </summary>
+        [JsonProperty("offer")] public PurchaseOfferResult? Offer { get; set; }
+    }
+
+    // ── Offers (docs/26) ──
+
+    /// <summary>
+    /// One offer instance for the active player
+    /// (<c>GET /sdk/v1/players/:p/offers</c>). Pass <see cref="InstanceId"/>
+    /// as <see cref="TrackPurchaseInput.OfferInstanceId"/> when the player buys.
+    /// </summary>
+    public sealed class Offer
+    {
+        [JsonProperty("instanceId")] public string InstanceId { get; set; } = string.Empty;
+        [JsonProperty("offerKey")] public string OfferKey { get; set; } = string.Empty;
+        /// <summary><c>bundle</c>, <c>starter_pack</c>, <c>chain</c>, <c>win_back</c>, <c>revenge</c>, <c>out_of_resource</c>.</summary>
+        [JsonProperty("kind")] public string Kind { get; set; } = string.Empty;
+        /// <summary>A string or a <c>{ locale: text }</c> map.</summary>
+        [JsonProperty("name")] public JToken? Name { get; set; }
+        [JsonProperty("description")] public JToken? Description { get; set; }
+        /// <summary>
+        /// <c>available</c>, <c>shown</c>, <c>pending_verification</c>,
+        /// <c>purchased</c>, <c>completed</c>, <c>dismissed</c>, <c>expired</c>.
+        /// </summary>
+        [JsonProperty("state")] public string State { get; set; } = string.Empty;
+        [JsonProperty("tier")] public int Tier { get; set; }
+        [JsonProperty("tierCount")] public int TierCount { get; set; }
+        /// <summary>What to sell now.</summary>
+        [JsonProperty("current")] public OfferTier Current { get; set; } = new();
+        /// <summary>Chain offers: the next, still locked tier (a preview); null otherwise.</summary>
+        [JsonProperty("next")] public OfferTier? Next { get; set; }
+        /// <summary>Server-anchored close time (ISO); the backstop before the first impression.</summary>
+        [JsonProperty("expiresAt")] public string? ExpiresAt { get; set; }
+        /// <summary>Chain offers: when the current tier's timer runs out (ISO).</summary>
+        [JsonProperty("tierExpiresAt")] public string? TierExpiresAt { get; set; }
+        /// <summary>The offer closes when the session ends.</summary>
+        [JsonProperty("endsWithSession")] public bool EndsWithSession { get; set; }
+        [JsonProperty("purchasesRemaining")] public int? PurchasesRemaining { get; set; }
+        [JsonProperty("presentation")] public OfferPresentation Presentation { get; set; } = new();
+        /// <summary>
+        /// The A/B variant this player sees (<see cref="Current"/>, <see cref="Next"/>
+        /// and <see cref="Presentation"/> already reflect it), for your analytics;
+        /// null for the base configuration.
+        /// </summary>
+        [JsonProperty("variantKey")] public string? VariantKey { get; set; }
+        /// <summary>
+        /// The linked event's key when the offer is event-linked (a sale while it
+        /// is live, or a post-event offer): show it on that event's screen. Null otherwise.
+        /// </summary>
+        [JsonProperty("linkedEventKey")] public string? LinkedEventKey { get; set; }
+    }
+
+    /// <summary>
+    /// One step of an <see cref="Offer"/>: sold through the store
+    /// (<c>Type == "paid"</c>), or, on chain offers, claimed for free with
+    /// <see cref="OffersClient.ClaimAsync"/> (<c>Type == "free"</c>, see
+    /// <see cref="IsFree"/>).
+    /// </summary>
+    public sealed class OfferTier
+    {
+        [JsonProperty("index")] public int Index { get; set; }
+        /// <summary><c>paid</c> or <c>free</c>. Absent on older servers, which means paid.</summary>
+        [JsonProperty("type", NullValueHandling = NullValueHandling.Ignore)] public string Type { get; set; } = "paid";
+        /// <summary>A free tier: claim it with <see cref="OffersClient.ClaimAsync"/>, never through a store.</summary>
+        [JsonIgnore] public bool IsFree => Type == "free";
+        /// <summary>The store product key; empty for a free tier (the wire sends null).</summary>
+        [JsonProperty("storeProductKey", NullValueHandling = NullValueHandling.Ignore)] public string StoreProductKey { get; set; } = string.Empty;
+        /// <summary>Store → SKU, e.g. <c>{ "google_play": "com.game.starter499" }</c>. Sell the SKU of your store. Empty for a free tier.</summary>
+        [JsonProperty("skus")] public Dictionary<string, string> Skus { get; set; } = new();
+        /// <summary>Reference USD price in cents (display fallback; the store price is what the player pays). 0 for a free tier.</summary>
+        [JsonProperty("referencePriceMinor")] public int ReferencePriceMinor { get; set; }
+        /// <summary>Reward entries, e.g. <c>{ "type": "currency", "currencyKey": "gems", "amount": 500 }</c>.</summary>
+        [JsonProperty("contents")] public List<Dictionary<string, JToken>> Contents { get; set; } = new();
+        [JsonProperty("label")] public JToken? Label { get; set; }
+        [JsonProperty("valueLabel")] public string? ValueLabel { get; set; }
+    }
+
+    /// <summary>How the dashboard asked the offer to be drawn. All optional.</summary>
+    public sealed class OfferPresentation
+    {
+        /// <summary><c>popup</c>, <c>banner</c> or <c>store_tile</c>.</summary>
+        [JsonProperty("layout")] public string? Layout { get; set; }
+        [JsonProperty("badge")] public string? Badge { get; set; }
+        [JsonProperty("artKey")] public string? ArtKey { get; set; }
+    }
+
+    /// <summary>Result of <see cref="OffersClient.MarkShownAsync"/>.</summary>
+    public sealed class OfferImpressionResult
+    {
+        [JsonProperty("offer")] public Offer Offer { get; set; } = new();
+        /// <summary>True for the impression that started the offer's timer.</summary>
+        [JsonProperty("firstImpression")] public bool FirstImpression { get; set; }
+        /// <summary>
+        /// True when a cap refused this impression: don't show the offer.
+        /// Re-rendering an offer already shown this session is never refused by
+        /// the game-wide caps.
+        /// </summary>
+        [JsonProperty("capped")] public bool Capped { get; set; }
+        /// <summary>
+        /// Why (<see cref="Capped"/> true), else null: <c>offer_cycle</c>,
+        /// <c>offer_day</c> (the offer's own caps), <c>global_session</c>,
+        /// <c>global_day</c>, <c>global_gap</c> (the game-wide fatigue caps).
+        /// </summary>
+        [JsonProperty("cappedReason")] public string? CappedReason { get; set; }
+        /// <summary>
+        /// When the same impression could succeed (ISO), when known:
+        /// <c>global_gap</c> → the last impression + the gap; <c>global_day</c> /
+        /// <c>offer_day</c> → the next UTC midnight. Null otherwise.
+        /// </summary>
+        [JsonProperty("retryAt")] public string? RetryAt { get; set; }
+    }
+
+    /// <summary>
+    /// What <see cref="OffersClient.TriggerAsync"/> reports happened in the
+    /// game. Build one with <see cref="FailEvent"/>,
+    /// <see cref="ResourceDepleted"/> or <see cref="LevelReached"/>.
+    /// </summary>
+    public sealed class OfferTriggerInput
+    {
+        /// <summary><c>fail_event</c>, <c>resource_depleted</c> or <c>level_reached</c>.</summary>
+        [JsonProperty("type")] public string Type { get; set; } = string.Empty;
+        [JsonProperty("key")] public string? Key { get; set; }
+        [JsonProperty("consecutive")] public int? Consecutive { get; set; }
+        [JsonProperty("resource")] public string? Resource { get; set; }
+        [JsonProperty("required")] public int? Required { get; set; }
+        [JsonProperty("available")] public int? Available { get; set; }
+        [JsonProperty("secondsToRegen")] public int? SecondsToRegen { get; set; }
+        [JsonProperty("level")] public int? Level { get; set; }
+
+        /// <summary>
+        /// A fail (<paramref name="key"/>, e.g. <c>level_failed</c>), with
+        /// <paramref name="consecutive"/> fails in a row including this one
+        /// (default 1). Arms revenge offers.
+        /// </summary>
+        public static OfferTriggerInput FailEvent(string key, int? consecutive = null) =>
+            new OfferTriggerInput { Type = "fail_event", Key = key, Consecutive = consecutive };
+
+        /// <summary>
+        /// The player tried an action needing <paramref name="required"/> of
+        /// <paramref name="resource"/> (a currency or item key) and has
+        /// <paramref name="available"/>; <paramref name="secondsToRegen"/> is
+        /// when a free refill arrives, if one does. Arms top-up offers.
+        /// </summary>
+        public static OfferTriggerInput ResourceDepleted(string resource, int required, int available, int? secondsToRegen = null) =>
+            new OfferTriggerInput
+            {
+                Type = "resource_depleted",
+                Resource = resource,
+                Required = required,
+                Available = available,
+                SecondsToRegen = secondsToRegen,
+            };
+
+        /// <summary>The player's level now.</summary>
+        public static OfferTriggerInput LevelReached(int level) =>
+            new OfferTriggerInput { Type = "level_reached", Level = level };
+    }
+
+    /// <summary>
+    /// One free chain tier claim (<see cref="OfferClaimResult.Claim"/>).
+    /// Exactly one of <see cref="Granted"/> / <see cref="StudioFulfils"/> is
+    /// true: when Kraty granted, the contents arrive as a grant; otherwise
+    /// deliver <see cref="Contents"/> yourself.
+    /// </summary>
+    public sealed class OfferClaim
+    {
+        [JsonProperty("claimId")] public string ClaimId { get; set; } = string.Empty;
+        [JsonProperty("offerId")] public string OfferId { get; set; } = string.Empty;
+        [JsonProperty("offerKey")] public string OfferKey { get; set; } = string.Empty;
+        [JsonProperty("instanceId")] public string InstanceId { get; set; } = string.Empty;
+        [JsonProperty("tier")] public int Tier { get; set; }
+        [JsonProperty("contents")] public List<Dictionary<string, JToken>> Contents { get; set; } = new();
+        [JsonProperty("granted")] public bool Granted { get; set; }
+        [JsonProperty("grantId")] public string? GrantId { get; set; }
+        [JsonProperty("studioFulfils")] public bool StudioFulfils { get; set; }
+        [JsonProperty("claimedAt")] public string ClaimedAt { get; set; } = string.Empty;
+        /// <summary>The A/B variant whose contents were claimed; null for the base configuration.</summary>
+        [JsonProperty("variantKey")] public string? VariantKey { get; set; }
+    }
+
+    /// <summary>Result of <see cref="OffersClient.ClaimAsync"/>: the claim and the offer after it.</summary>
+    public sealed class OfferClaimResult
+    {
+        [JsonProperty("claim")] public OfferClaim Claim { get; set; } = new();
+        /// <summary>The next tier is current with a fresh timer, or the state is <c>completed</c>.</summary>
+        [JsonProperty("offer")] public Offer Offer { get; set; } = new();
+    }
+
+    /// <summary>Result of <see cref="OffersClient.TriggerAsync"/>.</summary>
+    public sealed class OfferTriggerResult
+    {
+        /// <summary>The offers this trigger armed that can be shown now; empty when none did.</summary>
+        [JsonProperty("offers")] public List<Offer> Offers { get; set; } = new();
+    }
+
+    /// <summary>The offer a purchase was attributed to (<see cref="TrackPurchaseResult.Offer"/>).</summary>
+    public sealed class PurchaseOfferResult
+    {
+        [JsonProperty("offerId")] public string OfferId { get; set; } = string.Empty;
+        [JsonProperty("offerKey")] public string OfferKey { get; set; } = string.Empty;
+        [JsonProperty("instanceId")] public string? InstanceId { get; set; }
+        [JsonProperty("tier")] public int? Tier { get; set; }
+        /// <summary><c>explicit</c>: the purchase carried <c>OfferInstanceId</c>. <c>inferred</c>: matched by SKU, revenue only.</summary>
+        [JsonProperty("method")] public string Method { get; set; } = string.Empty;
+        /// <summary><c>attributed</c>, <c>pending_verification</c>, <c>granted</c>, <c>refused</c>, <c>disputed</c>, <c>failed</c>.</summary>
+        [JsonProperty("status")] public string Status { get; set; } = string.Empty;
+        /// <summary>The instance state after the purchase; null for inferred.</summary>
+        [JsonProperty("state")] public string? State { get; set; }
+        /// <summary>Kraty granted the contents (they arrive as a grant).</summary>
+        [JsonProperty("granted")] public bool Granted { get; set; }
+        /// <summary>Kraty will grant once a verified report of the purchase arrives.</summary>
+        [JsonProperty("pendingVerification")] public bool PendingVerification { get; set; }
+        /// <summary>The game delivers <see cref="Contents"/> itself (the offer's default).</summary>
+        [JsonProperty("studioFulfils")] public bool StudioFulfils { get; set; }
+        /// <summary>What the player bought (explicit only).</summary>
+        [JsonProperty("contents")] public List<Dictionary<string, JToken>>? Contents { get; set; }
+        /// <summary><c>verified</c>, <c>unverified</c> or <c>skipped</c>.</summary>
+        [JsonProperty("validationStatus")] public string ValidationStatus { get; set; } = string.Empty;
+        /// <summary>The A/B variant whose price and contents were sold; null for the base configuration.</summary>
+        [JsonProperty("variantKey")] public string? VariantKey { get; set; }
     }
 
     /// <summary>
