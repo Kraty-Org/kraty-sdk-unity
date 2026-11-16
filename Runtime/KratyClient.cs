@@ -100,6 +100,31 @@ namespace Kraty
         /// </summary>
         public bool? ChatProfanityFilter { get; set; }
 
+        /// <summary>
+        /// How long the chat outbox keeps retrying a send or edit while the
+        /// server is busy (5xx) or the network is down, measured from when the
+        /// message was queued (time held for a cooldown with
+        /// <see cref="ChatWaitForCooldown"/> doesn't count). After that the
+        /// call fails with <see cref="KratyChatNotSentError"/>. Default 120 s.
+        /// </summary>
+        public TimeSpan ChatOutboxTimeout { get; set; } = TimeSpan.FromSeconds(120);
+
+        /// <summary>
+        /// When a chat send reaches the head of its conversation's queue while
+        /// the conversation's cooldown is still running
+        /// (<c>Chat.CooldownRemaining</c> &gt; 0): false (the default) fails it at
+        /// once, locally, with a 429 <c>chat_slow_mode</c>
+        /// <see cref="KratyApiError"/> and no request; true holds it in the
+        /// outbox until the cooldown ends, then sends it. Each send can
+        /// override this with its <c>waitForCooldown</c> argument.
+        /// </summary>
+        public bool ChatWaitForCooldown { get; set; }
+
+        // Chat outbox backoff (no Retry-After): base * 2^(n-1) * [0.5, 1], capped.
+        // Internal so tests can shrink them.
+        internal TimeSpan ChatOutboxBackoffBase { get; set; } = TimeSpan.FromMilliseconds(500);
+        internal TimeSpan ChatOutboxBackoffMax { get; set; } = TimeSpan.FromSeconds(10);
+
         /// <summary>Override only for testing / staging. Production clients always hit the default.</summary>
         public string BaseUrl { get; set; } = "https://api.kraty.io";
 
@@ -142,6 +167,10 @@ namespace Kraty
                 SecretStore = SecretStore,
                 MembershipStore = MembershipStore,
                 ChatProfanityFilter = ChatProfanityFilter,
+                ChatOutboxTimeout = ChatOutboxTimeout,
+                ChatWaitForCooldown = ChatWaitForCooldown,
+                ChatOutboxBackoffBase = ChatOutboxBackoffBase,
+                ChatOutboxBackoffMax = ChatOutboxBackoffMax,
                 BaseUrl = BaseUrl,
                 Timeout = Timeout,
                 Retry = Retry,
@@ -165,6 +194,10 @@ namespace Kraty
                 SecretStore = SecretStore,
                 MembershipStore = MembershipStore,
                 ChatProfanityFilter = ChatProfanityFilter,
+                ChatOutboxTimeout = ChatOutboxTimeout,
+                ChatWaitForCooldown = ChatWaitForCooldown,
+                ChatOutboxBackoffBase = ChatOutboxBackoffBase,
+                ChatOutboxBackoffMax = ChatOutboxBackoffMax,
                 BaseUrl = BaseUrl,
                 Timeout = Timeout,
                 Retry = Retry,
@@ -285,6 +318,10 @@ namespace Kraty
             _platform = NormalizePlatform(opts.Platform) ?? DetectPlatform();
             _appVersion = string.IsNullOrWhiteSpace(opts.AppVersion) ? DetectAppVersion() : opts.AppVersion!.Trim();
             _chatFilter = opts.ChatProfanityFilter switch { true => "on", false => "off", null => null };
+            ChatOutboxTimeout = opts.ChatOutboxTimeout;
+            ChatWaitForCooldown = opts.ChatWaitForCooldown;
+            ChatOutboxBackoffBase = opts.ChatOutboxBackoffBase;
+            ChatOutboxBackoffMax = opts.ChatOutboxBackoffMax;
             _playerSecret = string.IsNullOrEmpty(opts.PlayerSecret) ? null : opts.PlayerSecret;
             _activeExternalPlayerId = string.IsNullOrEmpty(opts.ActiveExternalPlayerId)
                 ? null
@@ -410,6 +447,11 @@ namespace Kraty
         internal ISecretStore SecretStore => _secretStore;
         /// <summary><c>on</c> / <c>off</c> when the game set a chat filter choice, else null.</summary>
         internal string? ChatFilterValue => _chatFilter;
+        // Chat outbox settings (see KratyClientOptions).
+        internal TimeSpan ChatOutboxTimeout { get; }
+        internal bool ChatWaitForCooldown { get; }
+        internal TimeSpan ChatOutboxBackoffBase { get; }
+        internal TimeSpan ChatOutboxBackoffMax { get; }
 
         /// <summary>
         /// The active player this client is authenticated as. Resource
@@ -562,22 +604,30 @@ namespace Kraty
 
         /// <summary>
         /// <see cref="RequestAsync{T}"/> plus extra request headers (e.g. the
-        /// chat filter choice).
+        /// chat filter choice). <paramref name="retryOn429"/> false surfaces a
+        /// 429 at once instead of backing off and retrying (chat sends and
+        /// edits: a retried refusal is another spam strike).
+        /// <paramref name="maxAttempts"/> overrides
+        /// <see cref="RetryConfig.Attempts"/> (the chat outbox passes 1 and
+        /// runs its own retry loop, so the two never compound).
         /// </summary>
         internal async Task<T> RequestWithHeadersAsync<T>(
             HttpMethod method,
             string path,
             object? body,
             IReadOnlyDictionary<string, string>? headers,
-            CancellationToken cancellationToken
+            CancellationToken cancellationToken,
+            bool retryOn429 = true,
+            int? maxAttempts = null
         ) where T : class
         {
             var url = path.StartsWith("/", StringComparison.Ordinal) ? path : "/" + path;
             var idempotencyKey = ResolveIdempotencyKey(method, body);
             var requestBody = AttachIdempotencyKey(body, idempotencyKey);
+            var attempts = Math.Max(1, maxAttempts ?? _retry.Attempts);
 
             Exception? lastErr = null;
-            for (int attempt = 1; attempt <= _retry.Attempts; attempt++)
+            for (int attempt = 1; attempt <= attempts; attempt++)
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 try
@@ -608,7 +658,9 @@ namespace Kraty
                     }
 
                     var apiErr = await AsApiErrorAsync(res).ConfigureAwait(false);
-                    if (RetryableStatuses.Contains((int)res.StatusCode) && attempt < _retry.Attempts)
+                    var retryable = RetryableStatuses.Contains((int)res.StatusCode)
+                        && !((int)res.StatusCode == 429 && !retryOn429);
+                    if (retryable && attempt < attempts)
                     {
                         await SleepBackoffAsync(attempt, res, cancellationToken).ConfigureAwait(false);
                         lastErr = apiErr;
@@ -633,7 +685,7 @@ namespace Kraty
                         Ok = false,
                     });
                     var wrapped = new KratyNetworkError(ex.Message, ex);
-                    if (attempt < _retry.Attempts)
+                    if (attempt < attempts)
                     {
                         // A connectivity-class failure never reached the
                         // backend, so it gets the slower ladder (see
@@ -852,12 +904,29 @@ namespace Kraty
         {
             var text = await res.Content.ReadAsStringAsync().ConfigureAwait(false);
             var env = TryParseErrorEnvelope(text);
-            if (env != null) return new KratyApiError((int)res.StatusCode, env.Code, env.Message, env.Details);
-            return new KratyApiError(
-                (int)res.StatusCode,
-                KratyErrorCode.InternalError,
-                $"non-2xx response without an error envelope (status={(int)res.StatusCode})"
-            );
+            var err = env != null
+                ? new KratyApiError((int)res.StatusCode, env.Code, env.Message, env.Details)
+                : new KratyApiError(
+                    (int)res.StatusCode,
+                    KratyErrorCode.InternalError,
+                    $"non-2xx response without an error envelope (status={(int)res.StatusCode})"
+                );
+            err.RetryAfterHeader = ReadRetryAfter(res);
+            return err;
+        }
+
+        /// <summary>The response's <c>Retry-After</c> (seconds or a date) as a delay, or null.</summary>
+        internal static TimeSpan? ReadRetryAfter(HttpResponseMessage res)
+        {
+            var ra = res.Headers.RetryAfter;
+            if (ra == null) return null;
+            if (ra.Delta is TimeSpan d) return d < TimeSpan.Zero ? TimeSpan.Zero : d;
+            if (ra.Date is DateTimeOffset dt)
+            {
+                var left = dt - DateTimeOffset.UtcNow;
+                return left < TimeSpan.Zero ? TimeSpan.Zero : left;
+            }
+            return null;
         }
 
         // Self-serve externalPlayerId for fresh signups. Prefixed so a

@@ -581,17 +581,25 @@ namespace Kraty
         /// callbacks + <see cref="LeaderboardStream.CancelAsync"/>.
         ///
         /// <para>
-        /// Event kinds: <c>ready</c>, <c>score_update</c>, <c>closed</c>.
-        /// Does NOT auto-reconnect on transport drop; handle errors via
-        /// the returned stream's <c>OnError</c> and re-call
-        /// <see cref="LiveAsync"/> after a backoff if you want resumption.
+        /// Event kinds: <c>ready</c>, <c>score_update</c>, <c>finalized</c>,
+        /// <c>closed</c>. Reconnects on its own after a server <c>close</c>, a
+        /// drop, a busy server or 40 s of silence (see
+        /// <see cref="StreamOptions"/>; <c>OnConnection</c> reports it), and
+        /// stops for good after <c>closed</c>. Pass
+        /// <c>new StreamOptions { AutoReconnect = false }</c> for the old
+        /// single connection (handle <c>OnError</c> and re-call
+        /// <see cref="LiveAsync"/> yourself).
         /// </para>
         ///
         /// <para>
         /// Low-level; prefer <see cref="Subscribe"/> for game UIs.
         /// </para>
         /// </summary>
-        public Task<LeaderboardStream> LiveAsync(string leaderboardId, CancellationToken ct = default)
+        public Task<LeaderboardStream> LiveAsync(string leaderboardId, CancellationToken ct = default, StreamOptions? options = null)
+            => OpenLiveAsync(leaderboardId, ct, options, null);
+
+        internal Task<LeaderboardStream> OpenLiveAsync(
+            string leaderboardId, CancellationToken ct, StreamOptions? options, Action<LeaderboardStream>? configure)
         {
             return LeaderboardStreamFactory.OpenAsync(
                 _client.HttpForStreaming,
@@ -599,7 +607,9 @@ namespace Kraty
                 leaderboardId,
                 _client.AuthHeaderForStreaming,
                 _client.PlayerSecretForStreaming,
-                ct
+                ct,
+                options,
+                configure
             );
         }
 
@@ -646,6 +656,10 @@ namespace Kraty
         public int PollIntervalMs { get; set; } = 15000;
         /// <summary>Optional; receives transport / parse errors. SSE errors are non-fatal; the poll keeps running.</summary>
         public Action<Exception>? OnError { get; set; }
+        /// <summary>Optional; the SSE stream's reconnect status (<c>Connected</c> / <c>Reconnecting</c>).</summary>
+        public Action<StreamConnectionEvent>? OnConnection { get; set; }
+        /// <summary>Optional SSE stream options (auto-reconnect is on by default).</summary>
+        public StreamOptions? Stream { get; set; }
     }
 
     /// <summary>
@@ -660,6 +674,8 @@ namespace Kraty
         private readonly string _leaderboardId;
         private readonly Action<LeaderboardStreamEvent> _onEvent;
         private readonly Action<Exception> _onError;
+        private readonly Action<StreamConnectionEvent>? _onConnection;
+        private readonly StreamOptions? _streamOptions;
         private readonly int _pollIntervalMs;
         private readonly Dictionary<string, double> _lastSurfacedScore = new();
         private LeaderboardStream? _sseStream;
@@ -678,6 +694,8 @@ namespace Kraty
             _leaderboardId = leaderboardId;
             _onEvent = onEvent;
             _onError = opts.OnError ?? (_ => { });
+            _onConnection = opts.OnConnection;
+            _streamOptions = opts.Stream;
             _pollIntervalMs = opts.PollIntervalMs;
         }
 
@@ -735,17 +753,23 @@ namespace Kraty
         {
             try
             {
-                _sseStream = await _leaderboards.LiveAsync(_leaderboardId, _cts.Token).ConfigureAwait(false);
+                // Callbacks wired before the stream starts reading.
+                _sseStream = await _leaderboards.OpenLiveAsync(_leaderboardId, _cts.Token, _streamOptions, s =>
+                {
+                    s.OnEvent = Surface;
+                    s.OnError = err => {
+                        if (Volatile.Read(ref _closed) == 0) { try { _onError(err); } catch { /* swallow */ } }
+                    };
+                    s.OnConnection = ev => {
+                        if (Volatile.Read(ref _closed) == 0) _onConnection?.Invoke(ev);
+                    };
+                }).ConfigureAwait(false);
             }
             catch (Exception err)
             {
                 if (Volatile.Read(ref _closed) == 0) { try { _onError(err); } catch { /* swallow */ } }
                 return;
             }
-            _sseStream.OnEvent = Surface;
-            _sseStream.OnError = err => {
-                if (Volatile.Read(ref _closed) == 0) { try { _onError(err); } catch { /* swallow */ } }
-            };
         }
 
         private async Task RunPollLoopAsync()
@@ -1146,16 +1170,26 @@ namespace Kraty
         ///
         /// <para>
         /// Callbacks fire on the HTTP background thread; marshal to Unity's
-        /// main thread before touching <c>UnityEngine</c> APIs. Does NOT
-        /// auto-reconnect. Treat each event as "something changed, re-read
-        /// this"; the REST reads stay authoritative.
+        /// main thread before touching <c>UnityEngine</c> APIs. Reconnects on
+        /// its own after a server <c>close</c>, a drop, a busy server or 40 s
+        /// of silence (see <see cref="StreamOptions"/>; <c>OnConnection</c>
+        /// reports it). Changes made while it was reconnecting are not
+        /// replayed: re-read on <c>Connected</c>. Treat each event as
+        /// "something changed, re-read this"; the REST reads stay
+        /// authoritative.
         /// </para>
         /// </summary>
         /// <param name="as">Address a different player (server-side tooling only).</param>
         /// <param name="ct">Cancellation token.</param>
-        public async Task<InventoryStream> LiveAsync(
+        /// <param name="options">Stream options; <c>AutoReconnect = false</c> for a single connection.</param>
+        public Task<InventoryStream> LiveAsync(
             string? @as = null,
-            CancellationToken ct = default)
+            CancellationToken ct = default,
+            StreamOptions? options = null)
+            => OpenLiveAsync(@as, ct, options, null);
+
+        private async Task<InventoryStream> OpenLiveAsync(
+            string? @as, CancellationToken ct, StreamOptions? options, Action<InventoryStream>? configure)
         {
             var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
             return await InventoryStreamFactory.OpenAsync(
@@ -1164,7 +1198,9 @@ namespace Kraty
                 externalPlayerId,
                 _client.AuthHeaderForStreaming,
                 _client.PlayerSecretForStreaming,
-                ct
+                ct,
+                options,
+                configure
             ).ConfigureAwait(false);
         }
 
@@ -1187,25 +1223,36 @@ namespace Kraty
         /// Skip events this client caused (<c>origin: client</c>), so a
         /// consume doesn't bounce back as a refresh.
         /// </param>
-        /// <param name="onError">Transport failures; the subscription is done by then.</param>
+        /// <param name="onError">
+        /// Callback errors, and the error that ended the subscription for good
+        /// (a refused reopen). Drops are retried for you; with
+        /// <c>AutoReconnect = false</c>, transport failures too (the
+        /// subscription is done by then).
+        /// </param>
         /// <param name="as">Address a different player (server-side tooling only).</param>
         /// <param name="ct">Cancellation token.</param>
+        /// <param name="options">Stream options; <c>AutoReconnect = false</c> for a single connection.</param>
+        /// <param name="onConnection">Reconnect status (<c>Connected</c> / <c>Reconnecting</c>); re-read on <c>Connected</c>.</param>
         public async Task<InventoryStream> WatchAsync(
             Action<InventoryStreamEvent> handler,
             bool ignoreOwnWrites = false,
             Action<Exception>? onError = null,
             string? @as = null,
-            CancellationToken ct = default)
+            CancellationToken ct = default,
+            StreamOptions? options = null,
+            Action<StreamConnectionEvent>? onConnection = null)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
-            var stream = await LiveAsync(@as, ct).ConfigureAwait(false);
-            stream.OnEvent = ev =>
+            return await OpenLiveAsync(@as, ct, options, stream =>
             {
-                if (ignoreOwnWrites && ev.IsOwnWrite) return;
-                handler(ev);
-            };
-            if (onError != null) stream.OnError = onError;
-            return stream;
+                stream.OnEvent = ev =>
+                {
+                    if (ignoreOwnWrites && ev.IsOwnWrite) return;
+                    handler(ev);
+                };
+                if (onError != null) stream.OnError = onError;
+                if (onConnection != null) stream.OnConnection = onConnection;
+            }).ConfigureAwait(false);
         }
     }
 
@@ -2519,6 +2566,240 @@ namespace Kraty
         private readonly KratyClient _client;
         public ChatClient(KratyClient client) => _client = client;
 
+        // ── Cooldown tracking ───────────────────────────────────────
+        // Kind + channel cooldown of every conversation the SDK returned, the
+        // per-kind cooldowns from ConfigAsync (server defaults until then) and
+        // when the player may next send in each conversation. Guarded by _gate:
+        // sends can complete on any thread.
+        private readonly object _gate = new object();
+        private readonly Dictionary<string, (string Kind, int? ChannelCooldown)> _known = new();
+        private readonly Dictionary<string, int> _kindCooldowns = new()
+        {
+            ["direct"] = 1, ["group"] = 1, ["guild"] = 2, ["channel"] = 15,
+        };
+        private readonly Dictionary<string, DateTime> _readyAt = new();
+
+        private ChatConversation Observe(ChatConversation c)
+        {
+            if (!string.IsNullOrEmpty(c.ConversationId))
+            {
+                lock (_gate) _known[c.ConversationId] = (c.Kind, c.Channel?.CooldownSeconds);
+            }
+            return c;
+        }
+
+        private void HoldUntil(string conversationId, DateTime at)
+        {
+            lock (_gate)
+            {
+                if (!_readyAt.TryGetValue(conversationId, out var current) || at > current) _readyAt[conversationId] = at;
+            }
+        }
+
+        private int CooldownOf(string conversationId)
+        {
+            lock (_gate)
+            {
+                if (!_known.TryGetValue(conversationId, out var k)) return 0;
+                if (k.ChannelCooldown.HasValue) return k.ChannelCooldown.Value;
+                return _kindCooldowns.TryGetValue(k.Kind, out var cd) ? cd : 0;
+            }
+        }
+
+        private bool IsChannel(string conversationId)
+        {
+            lock (_gate) return _known.TryGetValue(conversationId, out var k) && k.Kind == "channel";
+        }
+
+        private TimeSpan CooldownLeft(string conversationId)
+        {
+            lock (_gate)
+            {
+                if (!_readyAt.TryGetValue(conversationId, out var at)) return TimeSpan.Zero;
+                var left = at - DateTime.UtcNow;
+                return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+            }
+        }
+
+        /// <summary>
+        /// Seconds until the player may send in this conversation again (0
+        /// when free): from the conversation's cooldown after a successful
+        /// send, and from a <c>chat_slow_mode</c> 429's <c>retryAfterSeconds</c>
+        /// (duplicate and rate-limit refusals don't hold the conversation).
+        /// Use it to grey out the send button. Knows a conversation's cooldown once the SDK has
+        /// returned it (<see cref="ConversationsAsync"/>,
+        /// <see cref="ConversationAsync"/>, <see cref="ChannelAsync"/>, …) and
+        /// <see cref="ConfigAsync"/>.
+        /// </summary>
+        public int CooldownRemaining(string conversationId)
+        {
+            lock (_gate)
+            {
+                if (!_readyAt.TryGetValue(conversationId, out var at)) return 0;
+                var left = (at - DateTime.UtcNow).TotalSeconds;
+                if (left <= 0)
+                {
+                    _readyAt.Remove(conversationId);
+                    return 0;
+                }
+                return (int)Math.Ceiling(left);
+            }
+        }
+
+        // One try of a send / edit: a single HTTP attempt (the outbox runs
+        // the retries, so they never compound with the client's). A 429
+        // surfaces at once (never retried: a retried refusal is another spam
+        // strike). Only chat_slow_mode feeds CooldownRemaining: a
+        // chat_duplicate_message wait is for that text only and
+        // chat_rate_limited is per player, so neither holds the conversation.
+        private async Task<T?> WriteOnceAsync<T>(
+            HttpMethod method, string path, string conversationId, object body, CancellationToken ct)
+        {
+            try
+            {
+                var env = await _client.RequestWithHeadersAsync<DataEnvelope<T>>(
+                    method, path, body, FilterHeaders(), ct, retryOn429: false, maxAttempts: 1).ConfigureAwait(false);
+                return env.Data;
+            }
+            catch (KratyApiError err) when (err.IsChatSlowMode && err.RetryAfterSeconds.HasValue)
+            {
+                HoldUntil(conversationId, DateTime.UtcNow.AddSeconds(err.RetryAfterSeconds!.Value));
+                throw;
+            }
+        }
+
+        // ── Outbox ──────────────────────────────────────────────────
+        // Sends queue per conversation (FIFO, one in flight; different
+        // conversations run in parallel). Each message retries the SAME
+        // request (same body, same clientMessageId, same idempotency key) on
+        // network errors, timeouts and 5xx until ChatOutboxTimeout; 4xx (429
+        // included) surface at once. In memory only.
+        private readonly object _outboxGate = new object();
+        private readonly Dictionary<string, Task> _outboxTails = new();
+
+        private Task<ChatMessage> EnqueueSend(
+            string conversationId, Dictionary<string, object?> body, string clientMessageId,
+            string? @as, bool waitForCooldown, CancellationToken ct)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Task? previous;
+            lock (_outboxGate)
+            {
+                _outboxTails.TryGetValue(conversationId, out previous);
+                _outboxTails[conversationId] = done.Task;
+            }
+            return RunAsync();
+
+            void Release()
+            {
+                lock (_outboxGate)
+                {
+                    if (_outboxTails.TryGetValue(conversationId, out var tail) && tail == done.Task)
+                        _outboxTails.Remove(conversationId);
+                }
+                done.TrySetResult(true);
+            }
+
+            async Task<ChatMessage> RunAsync()
+            {
+                var started = false;
+                try
+                {
+                    // `previous` never faults: it's the earlier message's
+                    // completion signal, not its result. Cancelling `ct`
+                    // abandons the wait.
+                    if (previous != null && !previous.IsCompleted)
+                    {
+                        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        using (ct.Register(() => cancelled.TrySetResult(true)))
+                        {
+                            await Task.WhenAny(previous, cancelled.Task).ConfigureAwait(false);
+                        }
+                        ct.ThrowIfCancellationRequested();
+                    }
+                    started = true;
+
+                    // Head of the queue: the cooldown decides, before any request.
+                    var held = TimeSpan.Zero;
+                    for (var left = CooldownLeft(conversationId); left > TimeSpan.Zero; left = CooldownLeft(conversationId))
+                    {
+                        if (!waitForCooldown) throw LocalSlowMode(left);
+                        var before = clock.Elapsed;
+                        await Task.Delay(left, ct).ConfigureAwait(false);
+                        held += clock.Elapsed - before;
+                    }
+
+                    var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+                    var message = await DeliverAsync(
+                        HttpMethod.Post, $"{path}/messages", conversationId, body, clientMessageId,
+                        clock, _client.ChatOutboxTimeout + held,
+                        retryCt => EnqueueSend(conversationId, body, clientMessageId, @as, waitForCooldown, retryCt),
+                        ct
+                    ).ConfigureAwait(false);
+                    HoldUntil(conversationId, DateTime.UtcNow.AddSeconds(CooldownOf(conversationId)));
+                    return message;
+                }
+                finally
+                {
+                    // Abandoned before its turn: the next message must still
+                    // wait for the one ahead of this one (one in flight).
+                    if (!started && previous != null && !previous.IsCompleted)
+                        _ = previous.ContinueWith(_ => Release(), TaskScheduler.Default);
+                    else
+                        Release();
+                }
+            }
+        }
+
+        // Retries one send / edit on network errors, timeouts and 5xx until
+        // `budget` (measured on `clock`) would pass, then throws
+        // KratyChatNotSentError. Waits the server's Retry-After /
+        // details.retryAfterSeconds, else a jittered backoff capped at 10 s.
+        private async Task<ChatMessage> DeliverAsync(
+            HttpMethod method, string path, string conversationId, object body, string? clientMessageId,
+            System.Diagnostics.Stopwatch clock, TimeSpan budget,
+            Func<CancellationToken, Task<ChatMessage>> resend, CancellationToken ct)
+        {
+            for (var attempt = 1; ; attempt++)
+            {
+                Exception last;
+                TimeSpan? hint = null;
+                try
+                {
+                    return await WriteOnceAsync<ChatMessage>(method, path, conversationId, body, ct).ConfigureAwait(false)
+                        ?? new ChatMessage();
+                }
+                catch (KratyApiError err) when (err.Status >= 500)
+                {
+                    last = err;
+                    hint = err.ServerRetryAfter;
+                }
+                catch (KratyNetworkError err)
+                {
+                    last = err;
+                }
+                var delay = hint ?? SseReconnectLoop.Backoff(attempt, _client.ChatOutboxBackoffBase, _client.ChatOutboxBackoffMax);
+                if (clock.Elapsed + delay > budget)
+                {
+                    throw new KratyChatNotSentError(
+                        $"chat {(clientMessageId != null ? "message" : "edit")} not sent after {attempt} attempt(s): {last.Message}",
+                        conversationId, clientMessageId, last, resend);
+                }
+                await Task.Delay(delay, ct).ConfigureAwait(false);
+            }
+        }
+
+        private static KratyApiError LocalSlowMode(TimeSpan left)
+        {
+            var seconds = Math.Max(1, (int)Math.Ceiling(left.TotalSeconds));
+            return new KratyApiError(
+                429,
+                KratyErrorCode.ChatSlowMode,
+                $"wait {seconds}s before sending here again (refused locally, nothing was sent)",
+                new Dictionary<string, object?> { ["raw"] = "{\"retryAfterSeconds\":" + seconds + ",\"local\":true}" });
+        }
+
         private async Task<string> BaseAsync(string? @as, CancellationToken ct)
         {
             var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
@@ -2566,8 +2847,16 @@ namespace Kraty
         public async Task<ChatClientConfig> ConfigAsync(string? @as = null, CancellationToken ct = default)
         {
             var b = await BaseAsync(@as, ct).ConfigureAwait(false);
-            return await CallAsync<ChatClientConfig>(HttpMethod.Get, $"{b}/config", null, ct).ConfigureAwait(false)
+            var cfg = await CallAsync<ChatClientConfig>(HttpMethod.Get, $"{b}/config", null, ct).ConfigureAwait(false)
                 ?? new ChatClientConfig();
+            lock (_gate)
+            {
+                foreach (var kv in cfg.Kinds)
+                {
+                    if (kv.Value != null && kv.Value.CooldownSeconds > 0) _kindCooldowns[kv.Key] = kv.Value.CooldownSeconds;
+                }
+            }
+            return cfg;
         }
 
         /// <summary>GET <c>/chat/preferences</c>: the player's saved filter choice and who may DM them.</summary>
@@ -2608,8 +2897,10 @@ namespace Kraty
         {
             var b = await BaseAsync(@as, ct).ConfigureAwait(false);
             var qs = Query(("kind", kind), ("limit", limit?.ToString()), ("offset", offset is > 0 ? offset.ToString() : null));
-            return await CallAsync<ChatConversationPage>(HttpMethod.Get, $"{b}/conversations{qs}", null, ct).ConfigureAwait(false)
+            var page = await CallAsync<ChatConversationPage>(HttpMethod.Get, $"{b}/conversations{qs}", null, ct).ConfigureAwait(false)
                 ?? new ChatConversationPage();
+            foreach (var c in page.Conversations) Observe(c);
+            return page;
         }
 
         /// <summary>GET <c>/chat/unread</c>: unread totals for a badge (muted conversations don't count).</summary>
@@ -2625,8 +2916,8 @@ namespace Kraty
             string conversationId, string? @as = null, CancellationToken ct = default)
         {
             var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
-            return await CallAsync<ChatConversation>(HttpMethod.Get, path, null, ct).ConfigureAwait(false)
-                ?? new ChatConversation();
+            return Observe(await CallAsync<ChatConversation>(HttpMethod.Get, path, null, ct).ConfigureAwait(false)
+                ?? new ChatConversation());
         }
 
         // ── Opening conversations ───────────────────────────────────
@@ -2646,8 +2937,8 @@ namespace Kraty
             var body = new Dictionary<string, object?>();
             if (externalPlayerId != null) body["externalPlayerId"] = externalPlayerId;
             else body["friendCode"] = friendCode;
-            return await CallAsync<ChatConversation>(HttpMethod.Post, $"{b}/direct", body, ct).ConfigureAwait(false)
-                ?? new ChatConversation();
+            return Observe(await CallAsync<ChatConversation>(HttpMethod.Post, $"{b}/direct", body, ct).ConfigureAwait(false)
+                ?? new ChatConversation());
         }
 
         /// <summary>POST <c>/chat/groups</c>: create a group you own; returns it with <c>Members</c>.</summary>
@@ -2663,8 +2954,8 @@ namespace Kraty
                 ["externalPlayerIds"] = externalPlayerIds?.ToList() ?? new List<string>(),
             };
             if (metadata != null) body["metadata"] = Raw(metadata);
-            return await CallAsync<ChatConversation>(HttpMethod.Post, $"{b}/groups", body, ct).ConfigureAwait(false)
-                ?? new ChatConversation();
+            return Observe(await CallAsync<ChatConversation>(HttpMethod.Post, $"{b}/groups", body, ct).ConfigureAwait(false)
+                ?? new ChatConversation());
         }
 
         /// <summary>PATCH <c>/chat/conversations/:id</c>: rename a group or replace its metadata (owner / admin).</summary>
@@ -2678,8 +2969,8 @@ namespace Kraty
             var body = new Dictionary<string, object?>();
             if (title != null) body["title"] = title;
             if (metadata != null) body["metadata"] = Raw(metadata);
-            return await CallAsync<ChatConversation>(new HttpMethod("PATCH"), path, body, ct).ConfigureAwait(false)
-                ?? new ChatConversation();
+            return Observe(await CallAsync<ChatConversation>(new HttpMethod("PATCH"), path, body, ct).ConfigureAwait(false)
+                ?? new ChatConversation());
         }
 
         /// <summary>POST <c>/chat/conversations/:id/members</c>: add players to a group.</summary>
@@ -2690,8 +2981,8 @@ namespace Kraty
             if (externalPlayerIds == null) throw new ArgumentNullException(nameof(externalPlayerIds));
             var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
             var body = new Dictionary<string, object?> { ["externalPlayerIds"] = externalPlayerIds.ToList() };
-            return await CallAsync<ChatConversation>(HttpMethod.Post, $"{path}/members", body, ct).ConfigureAwait(false)
-                ?? new ChatConversation();
+            return Observe(await CallAsync<ChatConversation>(HttpMethod.Post, $"{path}/members", body, ct).ConfigureAwait(false)
+                ?? new ChatConversation());
         }
 
         /// <summary>DELETE <c>/chat/conversations/:id/members/:externalPlayerId</c>: remove a member from a group.</summary>
@@ -2712,9 +3003,9 @@ namespace Kraty
         {
             var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
             var body = new Dictionary<string, object?> { ["role"] = role };
-            return await CallAsync<ChatConversation>(
+            return Observe(await CallAsync<ChatConversation>(
                 HttpMethod.Put, $"{path}/members/{Uri.EscapeDataString(externalPlayerId)}/role", body, ct
-            ).ConfigureAwait(false) ?? new ChatConversation();
+            ).ConfigureAwait(false) ?? new ChatConversation());
         }
 
         /// <summary>POST <c>/chat/conversations/:id/leave</c>: leave a group (an owner hands over first).</summary>
@@ -2730,8 +3021,8 @@ namespace Kraty
         public async Task<ChatConversation> GuildAsync(string? @as = null, CancellationToken ct = default)
         {
             var b = await BaseAsync(@as, ct).ConfigureAwait(false);
-            return await CallAsync<ChatConversation>(HttpMethod.Get, $"{b}/guild", null, ct).ConfigureAwait(false)
-                ?? new ChatConversation();
+            return Observe(await CallAsync<ChatConversation>(HttpMethod.Get, $"{b}/guild", null, ct).ConfigureAwait(false)
+                ?? new ChatConversation());
         }
 
         /// <summary>GET <c>/chat/channels</c>: the game's public channels as conversations.</summary>
@@ -2739,7 +3030,9 @@ namespace Kraty
         {
             var b = await BaseAsync(@as, ct).ConfigureAwait(false);
             var data = await CallAsync<ChatChannelsPayload>(HttpMethod.Get, $"{b}/channels", null, ct).ConfigureAwait(false);
-            return data?.Channels ?? new List<ChatConversation>();
+            var channels = data?.Channels ?? new List<ChatConversation>();
+            foreach (var c in channels) Observe(c);
+            return channels;
         }
 
         /// <summary>GET <c>/chat/channels/:channelKey</c>: one public channel's conversation.</summary>
@@ -2747,8 +3040,8 @@ namespace Kraty
             string channelKey, string? @as = null, CancellationToken ct = default)
         {
             var b = await BaseAsync(@as, ct).ConfigureAwait(false);
-            return await CallAsync<ChatConversation>(HttpMethod.Get, $"{b}/channels/{Uri.EscapeDataString(channelKey)}", null, ct)
-                .ConfigureAwait(false) ?? new ChatConversation();
+            return Observe(await CallAsync<ChatConversation>(HttpMethod.Get, $"{b}/channels/{Uri.EscapeDataString(channelKey)}", null, ct)
+                .ConfigureAwait(false) ?? new ChatConversation());
         }
 
         // ── Messages ────────────────────────────────────────────────
@@ -2772,18 +3065,63 @@ namespace Kraty
         }
 
         /// <summary>
-        /// POST <c>/chat/conversations/:id/messages</c>: send a text message.
-        /// <paramref name="clientMessageId"/> defaults to a fresh GUID, so a
-        /// retried send returns the original message instead of posting twice;
-        /// pass your own to match the echo to a pending local bubble.
+        /// POST <c>/chat/conversations/:id/messages</c>: send a text message
+        /// through the outbox, so a busy server or a network blip never fails it.
+        ///
+        /// <para>
+        /// <paramref name="clientMessageId"/> defaults to a fresh GUID, handed to
+        /// <paramref name="onPending"/> at once (synchronously, on the calling
+        /// thread, before any request) so the game can show a pending bubble and
+        /// match the stream's echo to it. The server dedupes on it: a resend
+        /// returns the original message, never a second one.
+        /// </para>
+        ///
+        /// <para>
+        /// Sends to one conversation go out one at a time, in call order.
+        /// Network errors, timeouts and 5xx (503 while the server scales up) are
+        /// retried with the same <c>clientMessageId</c>, waiting the server's
+        /// <c>Retry-After</c> or a backoff, for up to
+        /// <see cref="KratyClientOptions.ChatOutboxTimeout"/> (120 s); then it
+        /// throws <see cref="KratyChatNotSentError"/> (a
+        /// <see cref="KratyNetworkError"/>): show "not sent, tap to retry" and
+        /// call its <c>RetryAsync()</c>. The outbox lives in memory: a message
+        /// still pending when the app quits is not sent.
+        /// </para>
+        ///
+        /// <para>
+        /// Cooldown: if <see cref="CooldownRemaining"/> is above 0 when the
+        /// message reaches the head of its queue, it fails at once with a local
+        /// 429 <c>chat_slow_mode</c> (<see cref="KratyApiError.IsLocal"/>, no
+        /// request, no spam strike), unless <paramref name="waitForCooldown"/>
+        /// (default <see cref="KratyClientOptions.ChatWaitForCooldown"/>) holds
+        /// it until the cooldown ends.
+        /// </para>
+        ///
+        /// <para>
+        /// Anti-spam refusals from the server throw at once, never retried: 429
+        /// <c>chat_slow_mode</c>, <c>chat_duplicate_message</c> or
+        /// <c>chat_rate_limited</c>, with
+        /// <see cref="KratyApiError.RetryAfterSeconds"/>. Don't resend before
+        /// then: repeated refusals mute the player automatically (403
+        /// <c>chat_muted</c>). Other 4xx throw at once too.
+        /// </para>
         /// </summary>
+        /// <param name="conversationId">The conversation to post in.</param>
+        /// <param name="text">The message text.</param>
+        /// <param name="replyToId">Optional message this one replies to.</param>
+        /// <param name="clientMessageId">Your id for the message (pass the error's <c>ClientMessageId</c> to resend by hand); default a fresh GUID.</param>
+        /// <param name="as">Address a different player (server-side tooling only).</param>
+        /// <param name="ct">Cancels the send (and any wait in the outbox).</param>
+        /// <param name="waitForCooldown">Hold the message until the conversation's cooldown ends instead of failing; null = the client option.</param>
+        /// <param name="onPending">Receives the <c>clientMessageId</c> right away.</param>
         public Task<ChatMessage> SendAsync(
             string conversationId, string text, string? replyToId = null, string? clientMessageId = null,
-            string? @as = null, CancellationToken ct = default)
+            string? @as = null, CancellationToken ct = default,
+            bool? waitForCooldown = null, Action<string>? onPending = null)
         {
             if (text == null) throw new ArgumentNullException(nameof(text));
             var body = new Dictionary<string, object?> { ["type"] = "text", ["text"] = text };
-            return PostMessageAsync(conversationId, body, replyToId, clientMessageId, @as, ct);
+            return PostMessageAsync(conversationId, body, replyToId, clientMessageId, @as, waitForCooldown, onPending, ct);
         }
 
         /// <summary>
@@ -2791,30 +3129,32 @@ namespace Kraty
         /// a game card (<paramref name="customType"/> is one of the config's
         /// <c>Messages.CustomTypes</c>) with an optional caption.
         /// <paramref name="payload"/> may be a <see cref="JToken"/>, a dictionary
-        /// or a POCO; its keys are sent exactly as given. Auto-generates
-        /// <paramref name="clientMessageId"/> like <see cref="SendAsync"/>.
+        /// or a POCO; its keys are sent exactly as given. Goes through the
+        /// outbox exactly like <see cref="SendAsync"/> (queue, retries,
+        /// cooldown, <paramref name="onPending"/>, <see cref="KratyChatNotSentError"/>).
         /// </summary>
         public Task<ChatMessage> SendCustomAsync(
             string conversationId, string customType, object? payload, string? text = null,
             string? replyToId = null, string? clientMessageId = null,
-            string? @as = null, CancellationToken ct = default)
+            string? @as = null, CancellationToken ct = default,
+            bool? waitForCooldown = null, Action<string>? onPending = null)
         {
             if (string.IsNullOrEmpty(customType)) throw new ArgumentException("customType is required", nameof(customType));
             var body = new Dictionary<string, object?> { ["type"] = "custom", ["customType"] = customType };
             if (payload != null) body["payload"] = Raw(payload);
             if (text != null) body["text"] = text;
-            return PostMessageAsync(conversationId, body, replyToId, clientMessageId, @as, ct);
+            return PostMessageAsync(conversationId, body, replyToId, clientMessageId, @as, waitForCooldown, onPending, ct);
         }
 
-        private async Task<ChatMessage> PostMessageAsync(
+        private Task<ChatMessage> PostMessageAsync(
             string conversationId, Dictionary<string, object?> body, string? replyToId, string? clientMessageId,
-            string? @as, CancellationToken ct)
+            string? @as, bool? waitForCooldown, Action<string>? onPending, CancellationToken ct)
         {
             if (replyToId != null) body["replyToId"] = replyToId;
-            body["clientMessageId"] = string.IsNullOrEmpty(clientMessageId) ? Guid.NewGuid().ToString() : clientMessageId;
-            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
-            return await CallAsync<ChatMessage>(HttpMethod.Post, $"{path}/messages", body, ct).ConfigureAwait(false)
-                ?? new ChatMessage();
+            var id = string.IsNullOrEmpty(clientMessageId) ? Guid.NewGuid().ToString() : clientMessageId!;
+            body["clientMessageId"] = id;
+            onPending?.Invoke(id);
+            return EnqueueSend(conversationId, body, id, @as, waitForCooldown ?? _client.ChatWaitForCooldown, ct);
         }
 
         /// <summary>
@@ -2824,16 +3164,32 @@ namespace Kraty
         /// updated message with <see cref="ChatMessage.EditedAt"/> set; the
         /// conversation's live streams receive <c>message_edited</c>. Outside the
         /// window, or on someone else's message: <c>403 chat_edit_not_allowed</c>.
+        /// Edits count toward the per-minute rate; a 429 throws at once like
+        /// <see cref="SendAsync"/>. Network errors, timeouts and 5xx are retried
+        /// like a send (no queue, no cooldown check) for up to
+        /// <see cref="KratyClientOptions.ChatOutboxTimeout"/>, then it throws
+        /// <see cref="KratyChatNotSentError"/> (<c>ClientMessageId</c> null;
+        /// <c>RetryAsync()</c> re-runs the edit).
         /// </summary>
         public async Task<ChatMessage> EditMessageAsync(
             string conversationId, string messageId, string text, string? @as = null, CancellationToken ct = default)
         {
             if (text == null) throw new ArgumentNullException(nameof(text));
-            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
             var body = new Dictionary<string, object?> { ["text"] = text };
-            return await CallAsync<ChatMessage>(
-                new HttpMethod("PATCH"), $"{path}/messages/{Uri.EscapeDataString(messageId)}", body, ct
-            ).ConfigureAwait(false) ?? new ChatMessage();
+            return await EditCoreAsync(conversationId, messageId, body, @as, ct).ConfigureAwait(false);
+        }
+
+        private async Task<ChatMessage> EditCoreAsync(
+            string conversationId, string messageId, Dictionary<string, object?> body, string? @as, CancellationToken ct)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
+            return await DeliverAsync(
+                new HttpMethod("PATCH"), $"{path}/messages/{Uri.EscapeDataString(messageId)}", conversationId, body, null,
+                clock, _client.ChatOutboxTimeout,
+                retryCt => EditCoreAsync(conversationId, messageId, body, @as, retryCt),
+                ct
+            ).ConfigureAwait(false);
         }
 
         /// <summary>DELETE <c>/chat/conversations/:id/messages/:messageId</c>: delete your own message (or any, as a moderator here).</summary>
@@ -2856,9 +3212,15 @@ namespace Kraty
                 ?? new ChatReadResult();
         }
 
-        /// <summary>POST <c>/chat/conversations/:id/typing</c>: show a typing indicator to the others (call every few seconds while typing).</summary>
+        /// <summary>
+        /// POST <c>/chat/conversations/:id/typing</c>: show a typing indicator
+        /// to the others (call every few seconds while typing). Public channels
+        /// have no typing indicators: for a conversation the SDK knows is a
+        /// channel, nothing is sent.
+        /// </summary>
         public async Task TypingAsync(string conversationId, string? @as = null, CancellationToken ct = default)
         {
+            if (IsChannel(conversationId)) return;
             var path = await ConversationPathAsync(conversationId, @as, ct).ConfigureAwait(false);
             await CallAsync<JObject>(HttpMethod.Post, $"{path}/typing", new Dictionary<string, object?>(), ct).ConfigureAwait(false);
         }
@@ -2883,8 +3245,8 @@ namespace Kraty
                     .ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
             }
             if (settings.Hidden != null) body["hidden"] = settings.Hidden.Value;
-            return await CallAsync<ChatConversation>(HttpMethod.Put, $"{path}/settings", body, ct).ConfigureAwait(false)
-                ?? new ChatConversation();
+            return Observe(await CallAsync<ChatConversation>(HttpMethod.Put, $"{path}/settings", body, ct).ConfigureAwait(false)
+                ?? new ChatConversation());
         }
 
         // ── Live stream ─────────────────────────────────────────────
@@ -2897,16 +3259,33 @@ namespace Kraty
         ///
         /// <para>
         /// Wire callbacks in <paramref name="configure"/>: it runs before the
-        /// read loop starts, so nothing (not even <c>ready</c>) can fire
-        /// first. Callbacks run on the HTTP background thread. The stream
-        /// does NOT auto-reconnect; on <c>OnClose</c> / <c>OnError</c>, reopen
-        /// and catch up with <see cref="MessagesAsync"/>'s <c>after</c>.
+        /// first connect, so nothing (not even <c>ready</c>) can fire first.
+        /// Callbacks run on the HTTP background thread.
+        /// </para>
+        ///
+        /// <para>
+        /// The stream heals itself (<see cref="StreamOptions.AutoReconnect"/>,
+        /// on by default): after a server <c>close</c> (deploy, rebalance,
+        /// <c>slow_consumer</c>) it waits the server's <c>retryAfterMs</c>;
+        /// after a drop, a busy server (503) or 40 s without even a ping it
+        /// backs off (up to 15 s) and reopens. Once the new connection is
+        /// <c>ready</c> it catches up every conversation it delivered messages
+        /// for and hands the missed ones to <c>OnMessage</c> before any live
+        /// event, never twice. <c>OnConnection</c> reports
+        /// <c>Reconnecting</c> / <c>Connected</c>; <c>OnClose</c> and drops
+        /// don't reach the game. Only a refused reopen (401, 403
+        /// <c>chat_disabled</c>, …) stops it, through <c>OnError</c>. If the
+        /// first connect is refused this throws; if it fails transiently the
+        /// stream starts out reconnecting. <c>AutoReconnect = false</c> restores
+        /// the single connection: reopen on <c>OnClose</c> / <c>OnError</c> and
+        /// catch up with <see cref="MessagesAsync"/>'s <c>after</c> yourself.
         /// </para>
         /// <code>
         /// var stream = await kraty.Chat.LiveAsync(new[] { "global" }, s =>
         /// {
         ///     s.OnMessage = m => dispatcher.Enqueue(() => AppendBubble(m));
-        ///     s.OnClose = _ => ScheduleReconnect();
+        ///     s.OnConnection = c => dispatcher.Enqueue(() =>
+        ///         reconnectingBadge.SetActive(c.State == StreamConnectionState.Reconnecting));
         /// });
         /// // later
         /// await stream.CancelAsync();
@@ -2914,7 +3293,7 @@ namespace Kraty
         /// </summary>
         public async Task<ChatStream> LiveAsync(
             IEnumerable<string>? channels = null, Action<ChatStream>? configure = null,
-            string? @as = null, CancellationToken ct = default)
+            string? @as = null, CancellationToken ct = default, StreamOptions? options = null)
         {
             var externalPlayerId = await _client.ResolvePlayerIdAsync(@as, ct).ConfigureAwait(false);
             return await ChatStreamFactory.OpenAsync(
@@ -2926,7 +3305,10 @@ namespace Kraty
                 channels,
                 _client.ChatFilterValue,
                 configure,
-                ct
+                ct,
+                options,
+                (conversationId, after, token) =>
+                    MessagesAsync(conversationId, after: after, @as: externalPlayerId, ct: token)
             ).ConfigureAwait(false);
         }
     }

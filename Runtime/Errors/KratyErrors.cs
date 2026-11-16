@@ -49,6 +49,12 @@ namespace Kraty
 
         // ── inventory ────────────────────────────────────────────────
         public const string InventoryNotPermissive = "inventory_not_permissive";
+
+        // ── chat anti-spam ───────────────────────────────────────────
+        public const string ChatSlowMode = "chat_slow_mode";
+        public const string ChatDuplicateMessage = "chat_duplicate_message";
+        public const string ChatRateLimited = "chat_rate_limited";
+        public const string ChatMuted = "chat_muted";
     }
 
     /// <summary>
@@ -92,6 +98,20 @@ namespace Kraty
             Code = code;
             Details = details;
         }
+
+        /// <summary>
+        /// The response's <c>Retry-After</c> header, when it had one (set by
+        /// the SDK's transport; null on errors built by hand). The chat outbox
+        /// and the stream reconnect honour it on a 503.
+        /// </summary>
+        internal TimeSpan? RetryAfterHeader { get; set; }
+
+        /// <summary>
+        /// How long the server asked us to wait: the <c>Retry-After</c> header,
+        /// else <c>details.retryAfterSeconds</c>, else null.
+        /// </summary>
+        internal TimeSpan? ServerRetryAfter =>
+            RetryAfterHeader ?? (RetryAfterSecondsExact is double s ? TimeSpan.FromSeconds(s) : (TimeSpan?)null);
 
         /// <summary>
         /// Generic code matcher. Useful when matching on a code the
@@ -223,6 +243,75 @@ namespace Kraty
         /// <c>server_integration</c> key.
         /// </summary>
         public bool IsInventoryNotPermissive => Code == KratyErrorCode.InventoryNotPermissive;
+
+        // ── chat anti-spam ───────────────────────────────────────────
+        // Chat sends and edits are never auto-retried on 429: a retried
+        // refusal is another spam strike, and enough strikes mute the
+        // player automatically.
+
+        /// <summary>429: sent again before the conversation's cooldown passed.</summary>
+        public bool IsChatSlowMode => Code == KratyErrorCode.ChatSlowMode;
+
+        /// <summary>429: the same text again in this conversation within the duplicate window.</summary>
+        public bool IsChatDuplicateMessage => Code == KratyErrorCode.ChatDuplicateMessage;
+
+        /// <summary>429: over the game's messages-per-minute.</summary>
+        public bool IsChatRateLimited => Code == KratyErrorCode.ChatRateLimited;
+
+        /// <summary>
+        /// 403: the player is muted. Repeated spam refusals mute
+        /// automatically; an <c>OnRestriction</c> event arrives on the chat
+        /// stream too.
+        /// </summary>
+        public bool IsChatMuted => Code == KratyErrorCode.ChatMuted;
+
+        /// <summary>
+        /// Seconds to wait before trying again (<c>details.retryAfterSeconds</c>,
+        /// on the chat 429s), or null when the error carries none. Don't
+        /// resend sooner.
+        /// </summary>
+        public int? RetryAfterSeconds =>
+            RetryAfterSecondsExact is double s ? (int)Math.Ceiling(s) : (int?)null;
+
+        private double? RetryAfterSecondsExact
+        {
+            get
+            {
+                if (Details == null || !Details.TryGetValue("raw", out var raw) || !(raw is string json)) return null;
+                try
+                {
+                    var v = Newtonsoft.Json.Linq.JObject.Parse(json)["retryAfterSeconds"];
+                    if (v == null || (v.Type != Newtonsoft.Json.Linq.JTokenType.Integer && v.Type != Newtonsoft.Json.Linq.JTokenType.Float)) return null;
+                    return Math.Max(0, (double)v);
+                }
+                catch (Newtonsoft.Json.JsonException)
+                {
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>
+        /// True when the SDK refused the call itself, without a request: a
+        /// chat send while the conversation's cooldown is still running
+        /// (<c>details.local: true</c>). Not a spam strike.
+        /// </summary>
+        public bool IsLocal
+        {
+            get
+            {
+                if (Details == null || !Details.TryGetValue("raw", out var raw) || !(raw is string json)) return false;
+                try
+                {
+                    var v = Newtonsoft.Json.Linq.JObject.Parse(json)["local"];
+                    return v != null && v.Type == Newtonsoft.Json.Linq.JTokenType.Boolean && (bool)v;
+                }
+                catch (Newtonsoft.Json.JsonException)
+                {
+                    return false;
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -230,8 +319,11 @@ namespace Kraty
     /// response (DNS, socket reset, timeout, etc.). The SDK
     /// auto-retries network errors with backoff before surfacing
     /// this; by the time you see one, the retry budget is exhausted.
+    /// <see cref="KratyChatNotSentError"/> derives from it, so an existing
+    /// <c>catch (KratyNetworkError)</c> also catches a chat message the
+    /// outbox gave up on.
     /// </summary>
-    public sealed class KratyNetworkError : Exception
+    public class KratyNetworkError : Exception
     {
         public Exception? OriginalCause { get; }
 
@@ -240,5 +332,50 @@ namespace Kraty
         {
             OriginalCause = originalCause;
         }
+    }
+
+    /// <summary>
+    /// A chat message (or edit) the outbox could not deliver within
+    /// <see cref="KratyClientOptions.ChatOutboxTimeout"/>: the server stayed
+    /// busy (5xx) or the network stayed down the whole time. Nothing was
+    /// refused, so it is safe to try again: show the message as "not sent,
+    /// tap to retry" and call <see cref="RetryAsync"/> (or send again with
+    /// the same <see cref="ClientMessageId"/>). The server dedupes by
+    /// <c>clientMessageId</c>, so a retry never posts twice, even if an
+    /// earlier attempt did reach it.
+    /// </summary>
+    public sealed class KratyChatNotSentError : KratyNetworkError
+    {
+        private readonly Func<System.Threading.CancellationToken, System.Threading.Tasks.Task<ChatMessage>> _resend;
+
+        /// <summary>The conversation the message was for.</summary>
+        public string ConversationId { get; }
+
+        /// <summary>The id the message was sent with; null for an edit.</summary>
+        public string? ClientMessageId { get; }
+
+        /// <summary>The last failure seen: a <see cref="KratyNetworkError"/> or a 5xx <see cref="KratyApiError"/>.</summary>
+        public Exception LastError { get; }
+
+        internal KratyChatNotSentError(
+            string message,
+            string conversationId,
+            string? clientMessageId,
+            Exception lastError,
+            Func<System.Threading.CancellationToken, System.Threading.Tasks.Task<ChatMessage>> resend)
+            : base(message, lastError)
+        {
+            ConversationId = conversationId;
+            ClientMessageId = clientMessageId;
+            LastError = lastError;
+            _resend = resend;
+        }
+
+        /// <summary>
+        /// Sends it again through the outbox: same body, same
+        /// <see cref="ClientMessageId"/>, a fresh timeout budget. For an edit,
+        /// re-runs the edit. Resolves with the message.
+        /// </summary>
+        public System.Threading.Tasks.Task<ChatMessage> RetryAsync(System.Threading.CancellationToken ct = default) => _resend(ct);
     }
 }

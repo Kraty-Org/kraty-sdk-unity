@@ -2332,8 +2332,22 @@ namespace Kraty
         [JsonProperty("description")] public string? Description { get; set; }
         /// <summary><c>players</c> or <c>server_only</c> (announcements).</summary>
         [JsonProperty("postPolicy")] public string PostPolicy { get; set; } = "players";
-        /// <summary>Minimum seconds between two messages from the same player; 0 = off.</summary>
+        /// <summary>The channel's own cooldown; 0 = the channel kind's.</summary>
         [JsonProperty("slowModeSeconds")] public int SlowModeSeconds { get; set; }
+        /// <summary>
+        /// Seconds a player waits between two messages here: the larger of the
+        /// channel kind's and <see cref="SlowModeSeconds"/>, never under 15.
+        /// Sending sooner is refused with 429 <c>chat_slow_mode</c>.
+        /// </summary>
+        [JsonProperty("cooldownSeconds")] public int CooldownSeconds { get; set; } = 15;
+        /// <summary>Players per room; null = one room for everyone.</summary>
+        [JsonProperty("roomSize")] public int? RoomSize { get; set; }
+        /// <summary>
+        /// The viewer's room (0-based). Big channels split into rooms, each its
+        /// own conversation; the server places players automatically and
+        /// stickily. Announcements reach every room.
+        /// </summary>
+        [JsonProperty("room")] public int Room { get; set; }
         /// <summary>Who may post (reading is open); null = everyone.</summary>
         [JsonProperty("requirement")] public ChatRequirement? Requirement { get; set; }
         [JsonProperty("metadata")] public Dictionary<string, JToken> Metadata { get; set; } = new();
@@ -2479,6 +2493,8 @@ namespace Kraty
         [JsonProperty("enabled")] public bool Enabled { get; set; }
         /// <summary><c>always</c>, <c>on_by_default</c> or <c>off_by_default</c>.</summary>
         [JsonProperty("profanityFilter")] public string ProfanityFilter { get; set; } = string.Empty;
+        /// <summary>Seconds a player waits between two messages in one conversation of this kind (at least 1; 15 for channels).</summary>
+        [JsonProperty("cooldownSeconds")] public int CooldownSeconds { get; set; }
         /// <summary><c>direct</c>: <c>friends</c> or <c>anyone</c>.</summary>
         [JsonProperty("allowFrom")] public string? AllowFrom { get; set; }
         /// <summary><c>group</c>: most members one group may have.</summary>
@@ -2518,6 +2534,8 @@ namespace Kraty
     public sealed class ChatRateLimit
     {
         [JsonProperty("messagesPerMinute")] public int MessagesPerMinute { get; set; }
+        /// <summary>The same text again in a conversation within this many seconds is refused (429 <c>chat_duplicate_message</c>); 0 = off.</summary>
+        [JsonProperty("duplicateWindowSeconds")] public int DuplicateWindowSeconds { get; set; }
     }
 
     /// <summary>
